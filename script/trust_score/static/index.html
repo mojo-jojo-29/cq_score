@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pupil Dilation Trust Assessment</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Camera error overlay -->
+    <div id="camera-error-overlay" class="camera-error-overlay" style="display:none;">
+        <div class="camera-error-box">
+            <h2>Camera Error</h2>
+            <p id="camera-error-msg">Camera access failed.</p>
+            <button class="btn btn-primary" onclick="location.reload()">Reload Page</button>
+        </div>
+    </div>
+
+    <div class="header">
+        <h1>Pupil Dilation Trust Assessment</h1>
+        <p>Verify sports expertise through involuntary pupil response analysis</p>
+        <div class="mode-toggle">
+            <span class="mode-label" id="mode-label-live">Live</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="demo-toggle">
+                <span class="toggle-slider"></span>
+            </label>
+            <span class="mode-label" id="mode-label-demo">Demo</span>
+            <select id="demo-scenario" class="demo-scenario-select" style="display:none;">
+                <option value="pass">Expert (Spots Changes)</option>
+                <option value="fail">Novice (Misses Changes)</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Demo mode banner -->
+    <div id="demo-mode-banner" class="demo-mode-banner" style="display:none;">
+        DEMO MODE &mdash; Synthetic dilation data injected for demonstration
+    </div>
+
+    <div class="container">
+
+        <!-- ────── Persistent Persona Banner ────── -->
+        <div id="persona-banner" class="persona-banner" style="display:none;">
+            <div class="persona-avatar" id="persona-avatar">--</div>
+            <div class="persona-info">
+                <div class="persona-name" id="persona-name">--</div>
+                <div class="persona-role" id="persona-role">--</div>
+            </div>
+            <div class="persona-score-wrap">
+                <div class="persona-score" id="persona-score">--</div>
+                <div class="persona-score-label">Trust Score</div>
+            </div>
+        </div>
+
+        <!-- ────── Phase 1: Select ────── -->
+        <div id="phase-select" class="phase active">
+            <div class="card">
+                <h2>Select Assessment Parameters</h2>
+                <label for="sport-select">Sport</label>
+                <select id="sport-select">
+                    <option value="">Loading...</option>
+                </select>
+                <label for="level-select">Proficiency Level</label>
+                <select id="level-select">
+                    <option value="">Select a sport first</option>
+                </select>
+                <br>
+                <button id="btn-begin" class="btn btn-primary" disabled>Begin Assessment</button>
+            </div>
+        </div>
+
+        <!-- ────── Phase 2: Learning Pass ────── -->
+        <div id="phase-learning" class="phase">
+            <div class="card">
+                <h2>Learning Phase</h2>
+                <p>Study these images carefully. You will be tested on their order.</p>
+                <div class="slideshow-image-wrap">
+                    <img id="learning-img" src="" alt="Study image">
+                    <video id="learning-video" autoplay playsinline hidden></video>
+                    <canvas id="learning-canvas" class="webcam-mini"></canvas>
+                </div>
+                <p id="learning-counter" class="image-counter">Studying image 1 / 12</p>
+                <div class="progress-wrap">
+                    <div id="learning-progress" class="progress-bar"></div>
+                </div>
+                <div class="liveness-indicators">
+                    <div class="liveness-indicator">
+                        <div id="face-status-dot" class="face-dot absent"></div>
+                        <span id="face-status-text">No face</span>
+                    </div>
+                    <div class="liveness-indicator">
+                        <span>Blinks detected: <strong id="blink-count">0</strong></span>
+                    </div>
+                </div>
+                <div id="mediapipe-warning" class="mediapipe-warning" style="display:none;">
+                    Iris tracking unavailable &mdash; using estimated pupil data
+                </div>
+                <button id="btn-retry-calibration" class="btn btn-primary" style="display:none; margin-top:0.8rem;">Retry Learning Phase</button>
+            </div>
+        </div>
+
+        <!-- Camera quality indicator (shown after camera starts) -->
+        <div id="camera-quality" class="camera-quality" style="display:none;">
+            <div class="camera-quality-inner">
+                <span id="camera-quality-icon" class="camera-quality-icon"></span>
+                <div class="camera-quality-text">
+                    <div>Camera: <strong id="camera-res-text">--</strong></div>
+                    <div>Iris size: <strong id="camera-iris-text">--</strong> px &bull; Detection: <strong id="camera-detect-text">--</strong></div>
+                </div>
+                <span id="camera-quality-badge" class="camera-quality-badge">--</span>
+            </div>
+        </div>
+
+        <!-- ────── Phase 2b: Transition ────── -->
+        <div id="phase-transition" class="phase">
+            <div class="card">
+                <div class="transition-message">
+                    <h2>Get Ready</h2>
+                    <p>Now we'll test your recall. Some images may be in a different order.</p>
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ────── Phase 3: Slideshow ────── -->
+        <div id="phase-slideshow" class="phase">
+            <div class="card">
+                <h2>Test Phase</h2>
+                <p>Review each image carefully. Your pupil response is being monitored.</p>
+                <div class="slideshow-image-wrap">
+                    <img id="slideshow-img" src="" alt="Sport image">
+                    <video id="slideshow-video" autoplay playsinline hidden></video>
+                    <canvas id="slideshow-canvas" class="webcam-mini"></canvas>
+                </div>
+                <p id="image-counter" class="image-counter">Image 1 / 12</p>
+                <div class="progress-wrap">
+                    <div id="slideshow-progress" class="progress-bar"></div>
+                </div>
+                <div class="pupil-indicator">
+                    <div class="pupil-dot"></div>
+                    <span>Tracking active &mdash; Pupil: <strong id="live-pupil">--</strong> <span id="live-pupil-unit">px</span></span>
+                </div>
+                <div class="pupil-indicator">
+                    <div class="pupil-dot" style="background:#ff9800;"></div>
+                    <span>Facial reaction: <strong id="live-facial">--</strong></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ────── Phase 4: Processing ────── -->
+        <div id="phase-processing" class="phase">
+            <div class="card">
+                <div class="spinner-wrap">
+                    <div class="spinner"></div>
+                    <p>Analyzing pupil dilation patterns...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ────── Phase 5: Results ────── -->
+        <div id="phase-results" class="phase">
+            <div id="persona-result-card" class="persona-result-card" style="display:none;">
+                <!-- Filled by JS: avatar, name, role, base score → final score with +/- 40 -->
+            </div>
+            <div class="card" style="text-align:center;">
+                <h2>Assessment Results</h2>
+                <div id="verdict-badge" class="verdict-badge">--</div>
+                <div id="iris-warning" class="iris-warning" style="display:none;"></div>
+            </div>
+
+            <div class="results-grid">
+                <div class="card" style="text-align:center;">
+                    <h2>Verdict</h2>
+                    <div id="verdict-result" class="verdict-result">--</div>
+                </div>
+                <div class="card">
+                    <h2>Detection Summary</h2>
+                    <div class="stat-item">
+                        <div id="liveness-badge" class="liveness-badge passed">Liveness: --</div>
+                        <div id="detection-quality-badge" class="detection-quality-badge" style="margin-top:0.4rem;">Detection: --</div>
+                        <div id="liveness-reason" class="stat-label"></div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-baseline" class="stat-value">--</div>
+                        <div class="stat-label">Baseline Pupil Size (px)</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-detected" class="stat-value">--</div>
+                        <div class="stat-label">Swapped Images Detected</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-effect-size" class="stat-value">--</div>
+                        <div class="stat-label">Effect Size (Cohen's d)</div>
+                        <div class="effect-gauge-wrap">
+                            <div class="effect-gauge-track">
+                                <div id="effect-gauge-fill" class="effect-gauge-fill"></div>
+                                <div id="effect-gauge-threshold" class="effect-gauge-threshold" title="Threshold (0.5)"></div>
+                            </div>
+                            <div class="effect-gauge-labels">
+                                <span>0</span><span>0.5</span><span>1.0</span><span>1.5</span><span>2.0</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-swapped-mean" class="stat-value">--</div>
+                        <div class="stat-label">Swapped Mean (px)</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-correct-mean" class="stat-value">--</div>
+                        <div class="stat-label">Correct Mean (px)</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-reaction-time" class="stat-value">--</div>
+                        <div class="stat-label">Avg Reaction Time (ms)</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-confidence" class="stat-value">--</div>
+                        <div class="stat-label">Confidence Weight</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-facial-effect" class="stat-value">--</div>
+                        <div class="stat-label">Facial Effect Size</div>
+                    </div>
+                    <div class="stat-item">
+                        <div id="stat-composite" class="stat-value">--</div>
+                        <div class="stat-label">Composite Score (75/25)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Group Comparison: Correct vs Swapped</h2>
+                <p class="chart-subtitle">Mean pupil size comparison — the core of the relative comparison method</p>
+                <div class="chart-container" style="height:220px;">
+                    <canvas id="chart-group"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Pupil Size per Image</h2>
+                <div class="chart-container">
+                    <canvas id="chart-bar"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Dilation % from Baseline</h2>
+                <div class="chart-container">
+                    <canvas id="chart-line"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Reaction Time at Swapped Images</h2>
+                <div class="chart-container">
+                    <canvas id="chart-reaction"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Facial Reaction per Image</h2>
+                <p class="chart-subtitle">Involuntary micro-expressions detected at each image (swapped in red)</p>
+                <div class="chart-container">
+                    <canvas id="chart-facial"></canvas>
+                </div>
+            </div>
+
+            <!-- How This Works - Patented Method Explanation -->
+            <div class="card method-panel">
+                <button class="method-toggle" onclick="this.parentElement.classList.toggle('open')">
+                    How This Works — Patented Method
+                    <span class="method-arrow">&#9660;</span>
+                </button>
+                <div class="method-content">
+                    <ol class="method-steps">
+                        <li><strong>Learning Phase:</strong> Sport-specific images are shown in correct sequence. Your brain memorises the order while we capture a baseline pupil measurement.</li>
+                        <li><strong>Swap Introduction:</strong> Two images in the sequence are randomly swapped to create a controlled anomaly.</li>
+                        <li><strong>Test Phase:</strong> The modified sequence is displayed again while your pupil size is tracked at high frequency via webcam iris detection.</li>
+                        <li><strong>Relative Comparison (Cohen's d):</strong> We compare the <em>mean pupil size at swapped images</em> against the <em>mean at correct images</em>. A medium-or-greater effect size (d &ge; 0.5) indicates the brain detected the anomaly — proving domain expertise.</li>
+                        <li><strong>Liveness Validation:</strong> Blink detection and face presence checks ensure a real human is present, not a photo or video replay.</li>
+                        <li><strong>Reaction Time Analysis:</strong> The speed of the pupil response at swapped images provides an additional confidence signal — faster reactions indicate stronger recognition.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <button id="btn-restart" class="btn btn-restart" onclick="location.reload()">Restart Assessment</button>
+        </div>
+
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
