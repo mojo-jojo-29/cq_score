@@ -960,10 +960,19 @@
                 <div class="persona-result-role">${persona.role}</div>
                 <div class="persona-result-bio">${persona.bio}</div>
             </div>
-            <div class="persona-result-score-wrap">
-                <div class="persona-result-final-score" style="color:${scoreColor}">${persona.trust_score}</div>
-                <div class="persona-result-base">Base: ${persona.base_score}</div>
-                <div class="score-delta ${deltaClass}">${deltaSign}${persona.score_delta}</div>
+            <div class="persona-result-scores">
+                <div class="persona-score-before">
+                    <div class="persona-score-value">${persona.base_score}</div>
+                    <div class="persona-score-label">Before Test</div>
+                </div>
+                <div class="persona-score-arrow">
+                    <span class="score-delta ${deltaClass}">${deltaSign}${persona.score_delta}</span>
+                    <span class="arrow-icon">&rarr;</span>
+                </div>
+                <div class="persona-score-after">
+                    <div class="persona-score-value" style="color:${scoreColor}">${persona.trust_score}</div>
+                    <div class="persona-score-label">After Test</div>
+                </div>
             </div>
         `;
         card.style.display = 'flex';

@@ -886,6 +886,41 @@ select:focus, input:focus {
     color: #888;
     margin-top: 0.2rem;
 }
+
+/* ─── Before / After trust score layout ─────────────────────────────── */
+.persona-result-scores {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    flex-shrink: 0;
+}
+.persona-score-before,
+.persona-score-after {
+    text-align: center;
+}
+.persona-score-value {
+    font-size: 1.8rem;
+    font-weight: 800;
+    line-height: 1;
+    color: #16213e;
+}
+.persona-score-label {
+    font-size: 0.7rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 0.25rem;
+}
+.persona-score-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+}
+.arrow-icon {
+    font-size: 1.3rem;
+    color: #888;
+}
 .score-delta {
     display: inline-block;
     font-size: 0.9rem;
@@ -925,6 +960,8 @@ select:focus, input:focus {
         font-size: 1.1rem;
     }
     .persona-result-final-score { font-size: 1.6rem; }
+    .persona-result-scores { gap: 0.5rem; }
+    .persona-score-value { font-size: 1.4rem; }
 }
 
 /* ─── Transition screen ──────────────────────────────────────────────── */
