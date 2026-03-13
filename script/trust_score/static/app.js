@@ -80,15 +80,17 @@
     const PUPIL_HISTORY_SIZE = 20;
 
     // ─── Liveness / anti-spoofing state ─────────────────────────────────
-    const EAR_THRESHOLD_DESKTOP = 0.28;
-    const EAR_THRESHOLD_MOBILE  = 0.22;
-    const EAR_THRESHOLD = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
-        ? EAR_THRESHOLD_MOBILE : EAR_THRESHOLD_DESKTOP;
+    const EAR_FALLBACK_THRESHOLD = 0.22; // absolute fallback before calibration
+    const EAR_BLINK_RATIO = 0.75;       // blink = EAR drops below 75% of baseline
+    const EAR_BASELINE_SAMPLES = 30;     // frames to collect for baseline
     const LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144];
     const RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380];
 
     let blinkCount = 0;
     let eyesClosed = false;
+    let earBaseline = null;              // adaptive: mean open-eye EAR
+    let earBaselineBuf = [];             // buffer for computing baseline
+    let earThreshold = EAR_FALLBACK_THRESHOLD; // updated once baseline is set
 
     // Face presence counters (calibration)
     let calFaceFrames  = 0;
@@ -317,18 +319,31 @@
         const rightEAR = computeEAR(landmarks, RIGHT_EYE_IDX);
         const avgEAR   = (leftEAR + rightEAR) / 2.0;
 
-        // Log EAR periodically to help debug blink detection on mobile
-        if (earLogCounter++ % 30 === 0) {
-            console.log(`EAR: ${avgEAR.toFixed(3)} threshold: ${EAR_THRESHOLD} closed: ${eyesClosed} blinks: ${blinkCount} landmarks: ${landmarks.length}`);
+        // Adaptive baseline: collect open-eye EAR samples to set threshold
+        if (earBaseline === null) {
+            // Only collect when eyes are likely open (above fallback threshold)
+            if (avgEAR > EAR_FALLBACK_THRESHOLD) {
+                earBaselineBuf.push(avgEAR);
+            }
+            if (earBaselineBuf.length >= EAR_BASELINE_SAMPLES) {
+                earBaseline = earBaselineBuf.reduce((a, b) => a + b, 0) / earBaselineBuf.length;
+                earThreshold = earBaseline * EAR_BLINK_RATIO;
+                console.log(`EAR baseline set: ${earBaseline.toFixed(3)}, blink threshold: ${earThreshold.toFixed(3)}`);
+            }
         }
 
-        if (avgEAR < EAR_THRESHOLD) {
+        // Log EAR periodically to help debug blink detection on mobile
+        if (earLogCounter++ % 30 === 0) {
+            console.log(`EAR: ${avgEAR.toFixed(3)} threshold: ${earThreshold.toFixed(3)} baseline: ${earBaseline?.toFixed(3) || 'calibrating'} closed: ${eyesClosed} blinks: ${blinkCount}`);
+        }
+
+        if (avgEAR < earThreshold) {
             eyesClosed = true;
         } else if (eyesClosed) {
             // closed → open transition = one blink
             eyesClosed = false;
             blinkCount++;
-            console.log(`Blink #${blinkCount} detected (EAR: ${avgEAR.toFixed(3)})`);
+            console.log(`Blink #${blinkCount} detected (EAR: ${avgEAR.toFixed(3)}, threshold: ${earThreshold.toFixed(3)})`);
             const el = document.getElementById('blink-count');
             if (el) el.textContent = blinkCount;
         }
@@ -1146,6 +1161,10 @@
         // Reset liveness state
         blinkCount = 0;
         eyesClosed = false;
+        earBaseline = null;
+        earBaselineBuf = [];
+        earThreshold = EAR_FALLBACK_THRESHOLD;
+        earLogCounter = 0;
         calFaceFrames = 0;
         calTotalFrames = 0;
         const blinkEl = document.getElementById('blink-count');
