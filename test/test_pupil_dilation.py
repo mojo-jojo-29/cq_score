@@ -19,7 +19,8 @@ from pupil_dilation import (app, ALLOWED_SPORTS, DILATION_THRESHOLD_PCT,
                            PERSONAS, TEST_SCORE_DELTA,
                            get_images_for_level, _store, _validate_liveness,
                            _compute_reaction_times, _compute_confidence_weight,
-                           _compute_verdict, _compute_facial_verdict)
+                           _compute_verdict, _compute_facial_verdict,
+                           _compute_trust_response)
 
 
 def _readings(index, pupil_size, count=3, **extra):
@@ -1491,6 +1492,199 @@ class PupilDilationTestCase(unittest.TestCase):
         stored_data = _store[sid]['pupil_data']
         self.assertEqual(stored_data[0]['detection_method'], 'canvas_pupil')
         self.assertEqual(stored_data[1]['detection_method'], 'random_fallback')
+
+
+    # ─── Stateless POST /api/trust_score tests ─────────────────────────
+
+    def _stateless_payload(self, verdict_type='pass'):
+        """Build a full stateless POST payload."""
+        calibration = 10.0
+        wrong_indices = [1, 3]
+        num_images = 5
+        if verdict_type == 'pass':
+            readings = (
+                _readings(0, 10.1) + _readings(1, 12.5) + _readings(2, 10.2) +
+                _readings(3, 12.8) + _readings(4, 10.0)
+            )
+        else:
+            readings = (
+                _readings(0, 10.0) + _readings(1, 10.0) + _readings(2, 10.0) +
+                _readings(3, 10.0) + _readings(4, 10.0)
+            )
+        return {
+            'calibration_pupil_size': calibration,
+            'readings': readings,
+            'wrong_indices': wrong_indices,
+            'num_images': num_images,
+            'blink_count': 3,
+            'calibration_face_presence': 0.95,
+            'slideshow_face_presence': 0.90,
+            'iris_tracking_ratio': 0.85,
+            'measurement_type': 'pixel',
+            'detection_stats': {'canvas_pupil': 50, 'landmark_iris': 10, 'fallback': 5},
+            'facial_readings': [],
+            'facial_baseline': 0.0,
+            'persona': PERSONAS[0],
+        }
+
+    def test_stateless_post_trust_score_pass(self):
+        """POST /api/trust_score with PASS-worthy data returns PASS verdict."""
+        payload = self._stateless_payload('pass')
+        resp = self.client.post('/api/trust_score',
+                                data=json.dumps(payload),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['verdict'], 'PASS')
+        self.assertGreater(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertIn('persona', data)
+        self.assertEqual(data['persona']['score_delta'], TEST_SCORE_DELTA)
+
+    def test_stateless_post_trust_score_fail(self):
+        """POST /api/trust_score with FAIL-worthy data returns FAIL verdict."""
+        payload = self._stateless_payload('fail')
+        resp = self.client.post('/api/trust_score',
+                                data=json.dumps(payload),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['verdict'], 'FAIL')
+        self.assertLess(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+
+    def test_stateless_post_missing_fields_returns_400(self):
+        """POST /api/trust_score with missing required fields returns 400."""
+        resp = self.client.post('/api/trust_score',
+                                data=json.dumps({'calibration_pupil_size': 10.0}),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn('error', data)
+        self.assertIn('Missing required fields', data['error'])
+
+    def test_stateless_post_invalid_types_returns_400(self):
+        """POST /api/trust_score with invalid field types returns 400."""
+        payload = self._stateless_payload('pass')
+        payload['calibration_pupil_size'] = 'not_a_number'
+        resp = self.client.post('/api/trust_score',
+                                data=json.dumps(payload),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn('error', data)
+
+    def test_stateless_post_empty_body_returns_400(self):
+        """POST /api/trust_score with no body returns 400."""
+        resp = self.client.post('/api/trust_score',
+                                data='',
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_stateless_post_no_readings_returns_400(self):
+        """POST /api/trust_score with empty readings returns 400."""
+        payload = self._stateless_payload('pass')
+        payload['readings'] = []
+        resp = self.client.post('/api/trust_score',
+                                data=json.dumps(payload),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    # ─── Demo scenario tests ─────────────────────────────────────────────
+
+    def test_demo_pass_scenario_produces_pass(self):
+        """Demo mode with 'pass' scenario should produce PASS verdict."""
+        # Enable demo mode
+        self.client.post('/api/config',
+                         data=json.dumps({'demo_mode': True, 'demo_scenario': 'pass'}),
+                         content_type='application/json')
+        self._seed_store({
+            'calibration_pupil_size': 10.0,
+            'wrong_index': [1, 3],
+            'slideshow_images': ['a', 'b', 'c', 'd', 'e'],
+            'pupil_data': (
+                _readings(0, 10.0) + _readings(1, 10.0) + _readings(2, 10.0) +
+                _readings(3, 10.0) + _readings(4, 10.0)
+            ),
+            'blink_count': 3,
+            'calibration_face_presence': 0.95,
+            'slideshow_face_presence': 0.90,
+        })
+        resp = self.client.get('/api/trust_score')
+        data = resp.get_json()
+        self.assertEqual(data['verdict'], 'PASS')
+        self.assertTrue(data['demo_mode'])
+        # Restore
+        self.client.post('/api/config',
+                         data=json.dumps({'demo_mode': False}),
+                         content_type='application/json')
+
+    def test_demo_fail_scenario_produces_fail(self):
+        """Demo mode with 'fail' scenario should produce FAIL verdict."""
+        import random as _rng
+        _rng.seed(12345)
+        self.client.post('/api/config',
+                         data=json.dumps({'demo_mode': True, 'demo_scenario': 'fail'}),
+                         content_type='application/json')
+        # Use 12 images so random noise averages out reliably
+        imgs = [chr(ord('a') + i) for i in range(12)]
+        readings = []
+        for i in range(12):
+            readings += _readings(i, 10.0)
+        self._seed_store({
+            'calibration_pupil_size': 10.0,
+            'wrong_index': [1, 3],
+            'slideshow_images': imgs,
+            'pupil_data': readings,
+            'blink_count': 3,
+            'calibration_face_presence': 0.95,
+            'slideshow_face_presence': 0.90,
+        })
+        resp = self.client.get('/api/trust_score')
+        data = resp.get_json()
+        self.assertEqual(data['verdict'], 'FAIL')
+        self.assertTrue(data['demo_mode'])
+        # Restore
+        self.client.post('/api/config',
+                         data=json.dumps({'demo_mode': False}),
+                         content_type='application/json')
+
+    def test_demo_config_toggle(self):
+        """POST /api/config should toggle demo mode and scenario."""
+        resp = self.client.post('/api/config',
+                                data=json.dumps({'demo_mode': True, 'demo_scenario': 'fail'}),
+                                content_type='application/json')
+        data = resp.get_json()
+        self.assertTrue(data['demo_mode'])
+        self.assertEqual(data['demo_scenario'], 'fail')
+
+        resp = self.client.post('/api/config',
+                                data=json.dumps({'demo_mode': False}),
+                                content_type='application/json')
+        data = resp.get_json()
+        self.assertFalse(data['demo_mode'])
+
+    # ─── Input validation tests ──────────────────────────────────────────
+
+    def test_detect_pupil_bad_index_returns_400(self):
+        """detect_pupil with non-numeric index should return 400."""
+        resp = self.client.post('/detect_pupil',
+                                data={'index': 'abc'})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_calibrate_missing_body_returns_400(self):
+        """Calibrate with no JSON body returns 400."""
+        resp = self.client.post('/api/calibrate',
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_start_slideshow_returns_wrong_indices(self):
+        """start_slideshow response should include wrong_indices."""
+        resp = self.client.post('/start_slideshow',
+                                data=json.dumps({'sport': 'Archery', 'level': 'Basic'}),
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn('wrong_indices', data)
+        self.assertEqual(len(data['wrong_indices']), 2)
 
 
 if __name__ == '__main__':

@@ -5,11 +5,14 @@ import os
 import time
 import random
 import secrets
+import logging
 import mimetypes
 import uuid
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__, static_folder='static')
-app.secret_key = secrets.token_hex(32)  # Bug 3 fix: secure random secret key
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-fallback-key')
 
 # Load Haar cascades for face and eyes
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -60,7 +63,7 @@ FALSE_POSITIVE_THRESHOLD = 0.30
 # ─── Relative comparison verdict ─────────────────────────────────────────
 # Effect size threshold (Cohen's d).  0.5 = "medium effect" — the swapped-
 # image pupil readings are noticeably higher than the correct-image readings.
-EFFECT_SIZE_THRESHOLD = 0.5
+EFFECT_SIZE_THRESHOLD = float(os.environ.get('EFFECT_SIZE_THRESHOLD', '0.5'))
 
 # ─── Facial reaction composite weighting ─────────────────────────────
 PUPIL_WEIGHT = 0.75
@@ -87,7 +90,7 @@ MIN_IMAGE_COVERAGE = 0.5
 
 # ─── Liveness / anti-spoofing constants ──────────────────────────────────
 MIN_BLINKS_CALIBRATION = 1
-FACE_PRESENCE_THRESHOLD = 0.80  # 80% of frames must have a face
+FACE_PRESENCE_THRESHOLD = float(os.environ.get('FACE_PRESENCE_THRESHOLD', '0.80'))
 
 # Demo mode: inject simulated dilation at swapped images so the patent demo
 # clearly shows the concept end-to-end.  Set to False for real-world use.
@@ -327,39 +330,55 @@ def serve_static(filename):
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     """GET: return config. POST with {"demo_mode": true/false, "demo_scenario": "pass"|"fail"}: toggle demo mode/scenario."""
-    global _demo_mode, DEMO_MODE, _demo_scenario
-    if request.method == 'POST':
-        data = request.get_json()
-        if data and 'demo_mode' in data:
-            _demo_mode = bool(data['demo_mode'])
-            DEMO_MODE = _demo_mode
-        if data and 'demo_scenario' in data:
-            val = str(data['demo_scenario']).lower()
-            if val in ('pass', 'fail'):
-                _demo_scenario = val
-    return jsonify({
-        'demo_mode': _is_demo_mode(),
-        'demo_scenario': _demo_scenario,
-        'effect_size_threshold': EFFECT_SIZE_THRESHOLD,
-        'pupil_weight': PUPIL_WEIGHT,
-        'facial_weight': FACIAL_WEIGHT,
-        'composite_threshold': COMPOSITE_THRESHOLD,
-    })
+    try:
+        global _demo_mode, DEMO_MODE, _demo_scenario
+        logger.info('Config endpoint hit: %s', request.method)
+        if request.method == 'POST':
+            data = request.get_json()
+            if data and 'demo_mode' in data:
+                _demo_mode = bool(data['demo_mode'])
+                DEMO_MODE = _demo_mode
+                logger.info('Demo mode changed to: %s', _demo_mode)
+            if data and 'demo_scenario' in data:
+                val = str(data['demo_scenario']).lower()
+                if val in ('pass', 'fail'):
+                    _demo_scenario = val
+                    logger.info('Demo scenario changed to: %s', _demo_scenario)
+        return jsonify({
+            'demo_mode': _is_demo_mode(),
+            'demo_scenario': _demo_scenario,
+            'effect_size_threshold': EFFECT_SIZE_THRESHOLD,
+            'pupil_weight': PUPIL_WEIGHT,
+            'facial_weight': FACIAL_WEIGHT,
+            'composite_threshold': COMPOSITE_THRESHOLD,
+        })
+    except Exception:
+        logger.error('Unexpected error in api_config', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/api/persona', methods=['GET'])
 def api_persona():
     """Return a random persona and store it in the session."""
-    persona = random.choice(PERSONAS)
-    store = _get_store()
-    store['persona'] = persona
-    return jsonify(persona)
+    try:
+        logger.info('Persona endpoint hit')
+        persona = random.choice(PERSONAS)
+        store = _get_store()
+        store['persona'] = persona
+        return jsonify(persona)
+    except Exception:
+        logger.error('Unexpected error in api_persona', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/api/available_sports', methods=['GET'])
 def available_sports():
     """List sports and levels for the dropdown."""
-    return jsonify(ALLOWED_SPORTS)
+    try:
+        return jsonify(ALLOWED_SPORTS)
+    except Exception:
+        logger.error('Unexpected error in available_sports', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/api/calibrate', methods=['POST'])
@@ -368,49 +387,54 @@ def api_calibrate():
     Accept pupil size array from browser-side iris detection.
     Expects JSON: { "pupil_sizes": [12.3, 12.5, ...] }
     """
-    data = request.get_json()
-    if not data or 'pupil_sizes' not in data:
-        return jsonify({'error': 'Missing pupil_sizes array'}), 400
+    try:
+        logger.info('Calibrate endpoint hit')
+        data = request.get_json(silent=True)
+        if not data or 'pupil_sizes' not in data:
+            return jsonify({'error': 'Missing pupil_sizes array'}), 400
 
-    pupil_sizes = [p for p in data['pupil_sizes'] if isinstance(p, (int, float)) and p > 0]
-    if not pupil_sizes:
-        return jsonify({'error': 'No valid pupil sizes provided'}), 400
+        pupil_sizes = [p for p in data['pupil_sizes'] if isinstance(p, (int, float)) and p > 0]
+        if not pupil_sizes:
+            return jsonify({'error': 'No valid pupil sizes provided'}), 400
 
-    avg_pupil = float(np.mean(pupil_sizes))
+        avg_pupil = float(np.mean(pupil_sizes))
 
-    # Detect measurement type from request
-    measurement_type = data.get('measurement_type', 'pixel')
+        # Detect measurement type from request
+        measurement_type = data.get('measurement_type', 'pixel')
 
-    if measurement_type == 'ratio':
-        # Ratio-based: pupil/iris ratio (typically 0.3-0.7)
-        if avg_pupil < MIN_PUPIL_RATIO:
-            return jsonify({'error': f'Pupil ratio too small ({avg_pupil:.3f}). '
-                            f'Minimum is {MIN_PUPIL_RATIO}. Move closer to the camera.'}), 400
-        if avg_pupil > MAX_PUPIL_RATIO:
-            return jsonify({'error': f'Pupil ratio too large ({avg_pupil:.3f}). '
-                            f'Maximum is {MAX_PUPIL_RATIO}. Move farther from the camera.'}), 400
-    else:
-        # Pixel-based: original bounds
-        if avg_pupil < MIN_PUPIL_PX:
-            return jsonify({'error': f'Pupil size too small ({avg_pupil:.1f}px). '
-                            f'Minimum is {MIN_PUPIL_PX}px. Move closer to the camera.'}), 400
-        if avg_pupil > MAX_PUPIL_PX:
-            return jsonify({'error': f'Pupil size too large ({avg_pupil:.1f}px). '
-                            f'Maximum is {MAX_PUPIL_PX}px. Move farther from the camera.'}), 400
+        if measurement_type == 'ratio':
+            # Ratio-based: pupil/iris ratio (typically 0.3-0.7)
+            if avg_pupil < MIN_PUPIL_RATIO:
+                return jsonify({'error': f'Pupil ratio too small ({avg_pupil:.3f}). '
+                                f'Minimum is {MIN_PUPIL_RATIO}. Move closer to the camera.'}), 400
+            if avg_pupil > MAX_PUPIL_RATIO:
+                return jsonify({'error': f'Pupil ratio too large ({avg_pupil:.3f}). '
+                                f'Maximum is {MAX_PUPIL_RATIO}. Move farther from the camera.'}), 400
+        else:
+            # Pixel-based: original bounds
+            if avg_pupil < MIN_PUPIL_PX:
+                return jsonify({'error': f'Pupil size too small ({avg_pupil:.1f}px). '
+                                f'Minimum is {MIN_PUPIL_PX}px. Move closer to the camera.'}), 400
+            if avg_pupil > MAX_PUPIL_PX:
+                return jsonify({'error': f'Pupil size too large ({avg_pupil:.1f}px). '
+                                f'Maximum is {MAX_PUPIL_PX}px. Move farther from the camera.'}), 400
 
-    store = _get_store()
-    store['calibration_pupil_size'] = avg_pupil
-    store['measurement_type'] = measurement_type
+        store = _get_store()
+        store['calibration_pupil_size'] = avg_pupil
+        store['measurement_type'] = measurement_type
 
-    # Liveness fields (optional — old clients may omit them)
-    blink_count = data.get('blink_count')
-    if blink_count is not None:
-        store['blink_count'] = int(blink_count)
-    face_presence_ratio = data.get('face_presence_ratio')
-    if face_presence_ratio is not None:
-        store['calibration_face_presence'] = float(face_presence_ratio)
+        # Liveness fields (optional — old clients may omit them)
+        blink_count = data.get('blink_count')
+        if blink_count is not None:
+            store['blink_count'] = int(blink_count)
+        face_presence_ratio = data.get('face_presence_ratio')
+        if face_presence_ratio is not None:
+            store['calibration_face_presence'] = float(face_presence_ratio)
 
-    return jsonify({'calibration_pupil_size': avg_pupil, 'num_samples': len(pupil_sizes)})
+        return jsonify({'calibration_pupil_size': avg_pupil, 'num_samples': len(pupil_sizes)})
+    except Exception:
+        logger.error('Unexpected error in api_calibrate', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/api/submit_pupil_data', methods=['POST'])
@@ -419,85 +443,88 @@ def api_submit_pupil_data():
     Batch submit all slideshow pupil readings from the browser.
     Expects JSON: { "readings": [ {"index": 0, "pupil_size": 12.5}, ... ] }
     """
-    data = request.get_json()
-    if not data or 'readings' not in data:
-        return jsonify({'error': 'Missing readings array'}), 400
+    try:
+        logger.info('Submit pupil data endpoint hit')
+        data = request.get_json()
+        if not data or 'readings' not in data:
+            return jsonify({'error': 'Missing readings array'}), 400
 
-    readings = data['readings']
-    pupil_data = []
-    for r in readings:
-        idx = r.get('index')
-        ps = r.get('pupil_size')
-        if idx is not None:
-            entry = {
-                'index': int(idx),
-                'pupil_size': float(ps) if ps is not None else None,
-                'timestamp': time.time(),
-            }
-            # Preserve client-side timing for reaction-time analysis
-            if r.get('timestamp_ms') is not None:
-                entry['timestamp_ms'] = float(r['timestamp_ms'])
-            if r.get('image_onset_ms') is not None:
-                entry['image_onset_ms'] = float(r['image_onset_ms'])
-            # Preserve detection method for quality filtering
-            if r.get('detection_method') is not None:
-                entry['detection_method'] = r['detection_method']
-            pupil_data.append(entry)
+        readings = data['readings']
+        pupil_data = []
+        for r in readings:
+            idx = r.get('index')
+            ps = r.get('pupil_size')
+            if idx is not None:
+                entry = {
+                    'index': int(idx),
+                    'pupil_size': float(ps) if ps is not None else None,
+                    'timestamp': time.time(),
+                }
+                # Preserve client-side timing for reaction-time analysis
+                if r.get('timestamp_ms') is not None:
+                    entry['timestamp_ms'] = float(r['timestamp_ms'])
+                if r.get('image_onset_ms') is not None:
+                    entry['image_onset_ms'] = float(r['image_onset_ms'])
+                # Preserve detection method for quality filtering
+                if r.get('detection_method') is not None:
+                    entry['detection_method'] = r['detection_method']
+                pupil_data.append(entry)
 
-    store = _get_store()
-    store['pupil_data'] = pupil_data
+        store = _get_store()
+        store['pupil_data'] = pupil_data
 
-    # Liveness: slideshow face presence ratio
-    face_presence_ratio = data.get('face_presence_ratio')
-    if face_presence_ratio is not None:
-        store['slideshow_face_presence'] = float(face_presence_ratio)
+        # Liveness: slideshow face presence ratio
+        face_presence_ratio = data.get('face_presence_ratio')
+        if face_presence_ratio is not None:
+            store['slideshow_face_presence'] = float(face_presence_ratio)
 
-    # Iris tracking quality: what fraction of readings came from real MediaPipe
-    iris_tracking_ratio = data.get('iris_tracking_ratio')
-    if iris_tracking_ratio is not None:
-        store['iris_tracking_ratio'] = float(iris_tracking_ratio)
+        # Iris tracking quality: what fraction of readings came from real MediaPipe
+        iris_tracking_ratio = data.get('iris_tracking_ratio')
+        if iris_tracking_ratio is not None:
+            store['iris_tracking_ratio'] = float(iris_tracking_ratio)
 
-    # Measurement type (ratio vs pixel)
-    measurement_type = data.get('measurement_type')
-    if measurement_type is not None:
-        store['measurement_type'] = measurement_type
+        # Measurement type (ratio vs pixel)
+        measurement_type = data.get('measurement_type')
+        if measurement_type is not None:
+            store['measurement_type'] = measurement_type
 
-    # Detection stats: how many readings came from each method
-    detection_stats = data.get('detection_stats')
-    if detection_stats is not None:
-        store['detection_stats'] = detection_stats
+        # Detection stats: how many readings came from each method
+        detection_stats = data.get('detection_stats')
+        if detection_stats is not None:
+            store['detection_stats'] = detection_stats
 
-    # Facial reaction readings (optional — old clients may omit)
-    facial_readings = data.get('facial_readings')
-    if facial_readings is not None:
-        store['facial_data'] = facial_readings
-    facial_baseline = data.get('facial_baseline')
-    if facial_baseline is not None:
-        store['facial_baseline'] = float(facial_baseline)
+        # Facial reaction readings (optional — old clients may omit)
+        facial_readings = data.get('facial_readings')
+        if facial_readings is not None:
+            store['facial_data'] = facial_readings
+        facial_baseline = data.get('facial_baseline')
+        if facial_baseline is not None:
+            store['facial_baseline'] = float(facial_baseline)
 
-    return jsonify({'received': len(pupil_data)})
+        return jsonify({'received': len(pupil_data)})
+    except Exception:
+        logger.error('Unexpected error in api_submit_pupil_data', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
-@app.route('/api/trust_score', methods=['GET'])
-def api_trust_score():
-    """
-    Compute trust score from dilation data.
-    Returns verdict, trust score, per-image data, and swapped image indices.
-    """
-    store = _get_store()
+def _compute_trust_response(store):
+    """Core trust score computation. Accepts a dict with all required fields.
+    Returns (response_dict, status_code)."""
     calibration = store.get('calibration_pupil_size')
     wrong_indices = store.get('wrong_index', [])
     pupil_data = store.get('pupil_data', [])
-    images = store.get('slideshow_images', [])
+    num_images = store.get('num_images', 0)
+    persona = store.get('persona')
 
     if calibration is None:
-        return jsonify({'error': 'No calibration data'}), 400
+        return {'error': 'No calibration data'}, 400
     if not pupil_data:
-        return jsonify({'error': 'No pupil data submitted'}), 400
+        return {'error': 'No pupil data submitted'}, 400
 
     # ── Liveness gate ──
     liveness_passed, liveness_reason = _validate_liveness(store)
     if not liveness_passed:
+        logger.warning('Liveness failed: %s', liveness_reason)
         liveness_resp = {
             'verdict': 'LIVENESS FAILED',
             'liveness_passed': False,
@@ -505,7 +532,7 @@ def api_trust_score():
             'demo_mode': _is_demo_mode(),
             'calibration_pupil_size': calibration,
             'wrong_indices': wrong_indices,
-            'image_labels': [f"Image {i+1}" for i in range(len(images))],
+            'image_labels': [f"Image {i+1}" for i in range(num_images)],
             'per_image_sizes': [],
             'dilation_percentages': [],
             'detected_count': 0,
@@ -529,14 +556,13 @@ def api_trust_score():
             'per_image_facial_scores': [],
             'has_facial_data': False,
         }
-        persona = store.get('persona')
         if persona:
             liveness_resp['persona'] = {
                 **persona,
                 'trust_score': persona['base_score'] - TEST_SCORE_DELTA,
                 'score_delta': -TEST_SCORE_DELTA,
             }
-        return jsonify(liveness_resp)
+        return liveness_resp, 200
 
     # Filter out random_fallback readings — these are noise, not real measurements
     pupil_data = [r for r in pupil_data if r.get('detection_method') != 'random_fallback']
@@ -554,11 +580,10 @@ def api_trust_score():
                  if len(sizes) >= MIN_READINGS_PER_IMAGE}
 
     if not per_image:
-        return jsonify({'error': 'Insufficient pupil readings per image '
-                        f'(minimum {MIN_READINGS_PER_IMAGE} per image required)'}), 400
+        return {'error': 'Insufficient pupil readings per image '
+                f'(minimum {MIN_READINGS_PER_IMAGE} per image required)'}, 400
 
     # ── INCONCLUSIVE check: too few images with enough valid readings ──
-    num_images = len(images)
     coverage = len(per_image) / num_images if num_images > 0 else 0
     if not _is_demo_mode() and coverage < MIN_IMAGE_COVERAGE:
         inconclusive_resp = {
@@ -594,14 +619,13 @@ def api_trust_score():
             'per_image_facial_scores': [],
             'has_facial_data': False,
         }
-        persona = store.get('persona')
         if persona:
             inconclusive_resp['persona'] = {
                 **persona,
                 'trust_score': persona['base_score'],
                 'score_delta': 0,
             }
-        return jsonify(inconclusive_resp)
+        return inconclusive_resp, 200
 
     per_image_avg = {}
     for idx, sizes in per_image.items():
@@ -611,24 +635,18 @@ def api_trust_score():
     # the concept.  Uses varied jitter, temporal drift, and variable boost
     # to produce natural-looking biological data rather than mechanical charts.
     if _is_demo_mode():
-        num_images = len(images)
         # Temporal drift: gradual upward trend simulating pupil adaptation
         drift_per_image = random.uniform(DEMO_DRIFT_PER_IMAGE_MIN, DEMO_DRIFT_PER_IMAGE_MAX)
 
         # Pre-compute a unique "personality" offset for each correct image
-        # so the bar chart looks like real biological variation — some images
-        # cause slightly larger pupils (bright/exciting), others slightly smaller.
         image_personality = {}
         for i in range(num_images):
             if i not in wrong_indices:
-                # Each correct image gets a fixed offset: some positive, some negative
-                # Range: roughly -4% to +5% of baseline — enough to be visually distinct
                 image_personality[i] = calibration * random.uniform(-0.04, 0.05)
 
         for i in range(num_images):
             drift = calibration * drift_per_image * i
             if i not in wrong_indices:
-                # Apply personality + small random noise so each bar is unique
                 personality = image_personality.get(i, 0)
                 noise = calibration * random.gauss(0, 0.012)
                 per_image_avg[i] = calibration + personality + drift + noise
@@ -639,32 +657,27 @@ def api_trust_score():
         for idx in wrong_indices:
             drift = calibration * drift_per_image * idx
             if _demo_scenario == 'fail':
-                # Novice: no boost — swapped images look just like correct images
                 personality = calibration * random.uniform(-0.04, 0.05)
                 noise = calibration * random.gauss(0, 0.012)
                 per_image_avg[idx] = calibration + personality + drift + noise
             else:
-                # Expert: variable boost at swapped images (14-22% range)
                 boost_pct = random.uniform(DEMO_DILATION_BOOST_MIN, DEMO_DILATION_BOOST_MAX)
                 boost = calibration * boost_pct
                 extra_jitter = calibration * random.uniform(-0.02, 0.03)
                 per_image_avg[idx] = calibration + boost + drift + extra_jitter
 
-        # Inject variation into raw pupil_data readings so reaction-time
-        # charts show natural-looking onset patterns
+        # Inject variation into raw pupil_data readings
         injected_data = []
         for i in range(num_images):
             target_avg = per_image_avg[i]
-            base_onset = i * 4000.0  # approximate onset per image
-            for r_idx in range(4):  # 4 readings per image
-                ts = base_onset + 800 + r_idx * 250  # after settle window
-                # Swapped images: gradual ramp-up from baseline to dilated
+            base_onset = i * 4000.0
+            for r_idx in range(4):
+                ts = base_onset + 800 + r_idx * 250
                 if i in wrong_indices and r_idx == 0:
                     reading_val = calibration + (target_avg - calibration) * 0.3
                 elif i in wrong_indices and r_idx == 1:
                     reading_val = calibration + (target_avg - calibration) * 0.7
                 else:
-                    # Per-reading scatter: ±2% of baseline for realistic noise
                     reading_val = target_avg + calibration * random.gauss(0, 0.02)
                 injected_data.append({
                     'index': i,
@@ -673,11 +686,9 @@ def api_trust_score():
                     'timestamp_ms': ts,
                     'image_onset_ms': base_onset,
                 })
-            # Update per_image entry from injected readings
             readings_for_i = [r['pupil_size'] for r in injected_data if r['index'] == i]
             per_image_avg[i] = float(np.mean(readings_for_i))
 
-        # Replace pupil_data with injected data for reaction-time calculation
         pupil_data = injected_data
 
     # Compute dilation percentages
@@ -689,7 +700,6 @@ def api_trust_score():
             dilation_pct[idx] = 0.0
 
     # ── Relative comparison verdict ──
-    num_images = len(images)
     verdict, swapped_mean, correct_mean, effect_size = _compute_verdict(
         per_image_avg, wrong_indices, num_images)
 
@@ -745,7 +755,6 @@ def api_trust_score():
             _compute_facial_verdict(per_image_facial, wrong_indices, num_images)
         composite_score = round(
             PUPIL_WEIGHT * effect_size + FACIAL_WEIGHT * facial_effect_size, 4)
-        # Use composite verdict when facial data present
         if composite_score >= COMPOSITE_THRESHOLD:
             verdict = "PASS"
         else:
@@ -753,12 +762,11 @@ def api_trust_score():
         for i in range(num_images):
             ordered_facial.append(round(per_image_facial.get(i, 0.0), 4))
     else:
-        # No facial data — pupil-only verdict (already computed above)
         composite_score = round(effect_size, 4)
         for i in range(num_images):
             ordered_facial.append(0.0)
 
-    # Legacy per-image detection counts (kept for charts / backward compat)
+    # Legacy per-image detection counts
     threshold_px = calibration * DILATION_THRESHOLD_PCT
     detected_count = 0
     for idx in wrong_indices:
@@ -792,8 +800,6 @@ def api_trust_score():
         detection_quality = 'LOW'
 
     # ── Iris tracking quality gate (live mode only) ──
-    # In live mode, if most readings came from fallback (not real iris tracking),
-    # the data is unreliable — override verdict to prevent false results.
     iris_tracking_ratio = store.get('iris_tracking_ratio')
     iris_warning = None
     if not _is_demo_mode() and iris_tracking_ratio is not None:
@@ -803,7 +809,6 @@ def api_trust_score():
             if verdict in ('PASS', 'FAIL'):
                 verdict = 'LOW CONFIDENCE'
 
-    # Build per-image labels
     image_labels = [f"Image {i+1}" for i in range(num_images)]
 
     ordered_sizes = []
@@ -811,6 +816,9 @@ def api_trust_score():
     for i in range(num_images):
         ordered_sizes.append(per_image_avg.get(i, calibration))
         ordered_dilation.append(dilation_pct.get(i, 0.0))
+
+    logger.info('Trust score verdict: %s (effect_size=%.4f, composite=%.4f)',
+                verdict, effect_size, composite_score)
 
     response = {
         'verdict': verdict,
@@ -845,7 +853,6 @@ def api_trust_score():
         'has_facial_data': has_facial_data,
     }
 
-    persona = store.get('persona')
     if persona:
         delta = TEST_SCORE_DELTA if verdict == 'PASS' else -TEST_SCORE_DELTA
         response['persona'] = {
@@ -854,7 +861,88 @@ def api_trust_score():
             'score_delta': delta,
         }
 
-    return jsonify(response)
+    return response, 200
+
+
+@app.route('/api/trust_score', methods=['GET', 'POST'])
+def api_trust_score():
+    """
+    GET: Compute trust score from server-side store (legacy flow).
+    POST: Compute trust score from full payload (stateless — works on Vercel).
+    """
+    try:
+        if request.method == 'POST':
+            logger.info('Trust score POST endpoint hit (stateless)')
+            data = request.get_json(silent=True)
+            if not data:
+                return jsonify({'error': 'Missing request body'}), 400
+
+            # Validate required fields
+            required = ['calibration_pupil_size', 'readings', 'wrong_indices', 'num_images']
+            missing = [f for f in required if f not in data]
+            if missing:
+                logger.warning('Missing fields in POST /api/trust_score: %s', missing)
+                return jsonify({'error': f'Missing required fields: {", ".join(missing)}'}), 400
+
+            try:
+                calibration = float(data['calibration_pupil_size'])
+                num_images = int(data['num_images'])
+                wrong_indices = [int(i) for i in data['wrong_indices']]
+            except (ValueError, TypeError) as e:
+                logger.warning('Invalid field types in POST /api/trust_score: %s', e)
+                return jsonify({'error': 'Invalid field types'}), 400
+
+            # Build readings
+            raw_readings = data['readings']
+            pupil_data = []
+            for r in raw_readings:
+                idx = r.get('index')
+                ps = r.get('pupil_size')
+                if idx is not None:
+                    entry = {
+                        'index': int(idx),
+                        'pupil_size': float(ps) if ps is not None else None,
+                        'timestamp': time.time(),
+                    }
+                    if r.get('timestamp_ms') is not None:
+                        entry['timestamp_ms'] = float(r['timestamp_ms'])
+                    if r.get('image_onset_ms') is not None:
+                        entry['image_onset_ms'] = float(r['image_onset_ms'])
+                    if r.get('detection_method') is not None:
+                        entry['detection_method'] = r['detection_method']
+                    pupil_data.append(entry)
+
+            # Build store-like dict from payload
+            store = {
+                'calibration_pupil_size': calibration,
+                'wrong_index': wrong_indices,
+                'pupil_data': pupil_data,
+                'num_images': num_images,
+                'blink_count': int(data.get('blink_count', 0)),
+                'calibration_face_presence': float(data.get('calibration_face_presence', 1.0)),
+                'slideshow_face_presence': float(data.get('slideshow_face_presence', 1.0)),
+                'iris_tracking_ratio': float(data['iris_tracking_ratio']) if data.get('iris_tracking_ratio') is not None else None,
+                'measurement_type': data.get('measurement_type', 'pixel'),
+                'detection_stats': data.get('detection_stats', {}),
+                'facial_data': data.get('facial_readings', []),
+                'facial_baseline': float(data['facial_baseline']) if data.get('facial_baseline') is not None else None,
+                'persona': data.get('persona'),
+            }
+
+            response, status = _compute_trust_response(store)
+            return jsonify(response), status
+
+        # GET: legacy store-based flow
+        logger.info('Trust score GET endpoint hit (legacy store-based)')
+        store = _get_store()
+        images = store.get('slideshow_images', [])
+        store['num_images'] = len(images)
+        response, status = _compute_trust_response(store)
+        return jsonify(response), status
+
+    except Exception:
+        logger.error('Unexpected error in api_trust_score', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 # ─── Original endpoints (bug-fixed) ────────────────────────────────────────
@@ -887,25 +975,30 @@ def start_slideshow():
     Starts the slideshow based on coach proficiency.
     Expects JSON: { "sport": "Archery", "level": "Basic" }
     """
-    data = request.get_json()
-    sport = data.get('sport', 'Archery')
-    level = data.get('level', 'Basic')
+    try:
+        logger.info('Start slideshow endpoint hit')
+        data = request.get_json()
+        sport = data.get('sport', 'Archery')
+        level = data.get('level', 'Basic')
 
-    images = get_images_for_level(sport, level)
-    if not images:
-        return jsonify({'error': 'No images found for this level'}), 400
+        images = get_images_for_level(sport, level)
+        if not images:
+            return jsonify({'error': 'No images found for this level'}), 400
 
-    randomize_image_list, first, second = randomize_image(images)
+        randomize_image_list, first, second = randomize_image(images)
 
-    store = _get_store()
-    store['original_images'] = images
-    store['slideshow_images'] = randomize_image_list
-    store['wrong_index'] = [first, second]
-    store['pupil_data'] = []
-    store['wrong_image_start_time'] = None
-    store['wrong_image_pupil'] = None
+        store = _get_store()
+        store['original_images'] = images
+        store['slideshow_images'] = randomize_image_list
+        store['wrong_index'] = [first, second]
+        store['pupil_data'] = []
+        store['wrong_image_start_time'] = None
+        store['wrong_image_pupil'] = None
 
-    return jsonify({'num_images': len(randomize_image_list)})
+        return jsonify({'num_images': len(randomize_image_list), 'wrong_indices': [first, second]})
+    except Exception:
+        logger.error('Unexpected error in start_slideshow', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/get_image/<int:index>', methods=['GET'])
@@ -955,25 +1048,32 @@ def detect_pupil():
     """
     Accepts a single frame (image) as form-data with key 'frame' and the current image index.
     """
-    if 'frame' not in request.files or 'index' not in request.form:
-        return jsonify({'error': 'No frame or index provided'}), 400
-    file = request.files['frame']
-    image_bytes = file.read()
-    index = int(request.form['index'])
-    pupil_size = detect_pupil_dilation_from_frame(image_bytes)
+    try:
+        if 'frame' not in request.files or 'index' not in request.form:
+            return jsonify({'error': 'No frame or index provided'}), 400
+        file = request.files['frame']
+        image_bytes = file.read()
+        try:
+            index = int(request.form['index'])
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid index value'}), 400
+        pupil_size = detect_pupil_dilation_from_frame(image_bytes)
 
-    store = _get_store()
-    pupil_data = store.get('pupil_data', [])
-    pupil_data.append({'index': index, 'pupil_size': pupil_size, 'timestamp': time.time()})
-    store['pupil_data'] = pupil_data
+        store = _get_store()
+        pupil_data = store.get('pupil_data', [])
+        pupil_data.append({'index': index, 'pupil_size': pupil_size, 'timestamp': time.time()})
+        store['pupil_data'] = pupil_data
 
-    # Bug 2 fix: use `in` check against list instead of `==` against list
-    if index in store.get('wrong_index', []):
-        if store.get('wrong_image_pupil') is None:
-            store['wrong_image_pupil'] = pupil_size
-            store['wrong_image_time'] = time.time()
+        # Bug 2 fix: use `in` check against list instead of `==` against list
+        if index in store.get('wrong_index', []):
+            if store.get('wrong_image_pupil') is None:
+                store['wrong_image_pupil'] = pupil_size
+                store['wrong_image_time'] = time.time()
 
-    return jsonify({'pupil_size': pupil_size})
+        return jsonify({'pupil_size': pupil_size})
+    except Exception:
+        logger.error('Unexpected error in detect_pupil', exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/slideshow_results', methods=['GET'])
