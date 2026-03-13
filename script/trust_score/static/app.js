@@ -80,9 +80,9 @@
     const PUPIL_HISTORY_SIZE = 20;
 
     // ─── Liveness / anti-spoofing state ─────────────────────────────────
-    const EAR_FALLBACK_THRESHOLD = 0.22; // absolute fallback before calibration
-    const EAR_BLINK_RATIO = 0.75;       // blink = EAR drops below 75% of baseline
-    const EAR_BASELINE_SAMPLES = 30;     // frames to collect for baseline
+    const EAR_FALLBACK_THRESHOLD = 0.25; // absolute fallback before calibration
+    const EAR_BLINK_RATIO = 0.80;       // blink = EAR drops below 80% of baseline
+    const EAR_BASELINE_SAMPLES = 20;     // frames to collect for baseline
     const LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144];
     const RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380];
 
@@ -313,20 +313,23 @@
     }
 
     let earLogCounter = 0;
+    let lastBlinkLandmarks = null;  // track to avoid re-processing same landmarks
     function updateBlinkDetection(landmarks) {
         if (!landmarks || landmarks.length < 468) return;
+        // Skip if we already processed this exact landmark set
+        if (landmarks === lastBlinkLandmarks) return;
+        lastBlinkLandmarks = landmarks;
         const leftEAR  = computeEAR(landmarks, LEFT_EYE_IDX);
         const rightEAR = computeEAR(landmarks, RIGHT_EYE_IDX);
         const avgEAR   = (leftEAR + rightEAR) / 2.0;
 
-        // Adaptive baseline: collect open-eye EAR samples to set threshold
+        // Adaptive baseline: collect EAR samples to set threshold
         if (earBaseline === null) {
-            // Only collect when eyes are likely open (above fallback threshold)
-            if (avgEAR > EAR_FALLBACK_THRESHOLD) {
-                earBaselineBuf.push(avgEAR);
-            }
+            earBaselineBuf.push(avgEAR);
             if (earBaselineBuf.length >= EAR_BASELINE_SAMPLES) {
-                earBaseline = earBaselineBuf.reduce((a, b) => a + b, 0) / earBaselineBuf.length;
+                // Use median (robust to blinks during calibration)
+                const sorted = [...earBaselineBuf].sort((a, b) => a - b);
+                earBaseline = sorted[Math.floor(sorted.length * 0.75)]; // 75th percentile = open eyes
                 earThreshold = earBaseline * EAR_BLINK_RATIO;
                 console.log(`EAR baseline set: ${earBaseline.toFixed(3)}, blink threshold: ${earThreshold.toFixed(3)}`);
             }
@@ -1180,16 +1183,28 @@
         learnVideo.addEventListener('loadedmetadata', syncLearnCanvas, { once: true });
         syncLearnCanvas();
 
-        // Continuous render loop: video frame + iris dots (smooth ~60fps)
-        // Also runs throttled blink detection (~every 150ms) so quick blinks
-        // aren't missed between the slower 500ms pupil-sampling interval.
-        let lastBlinkCheck = 0;
-        const BLINK_CHECK_INTERVAL = 100;
+        // Separate face detection from blink checking:
+        // - Face detection runs in its own async loop (may be slow on mobile CPU)
+        // - Blink detection runs every animation frame using cached landmarks (60fps)
+        // This ensures blinks aren't missed even if face detection is slow.
+        let faceDetectRunning = false;
+        let learnDetectActive = true;
+        async function faceDetectLoop() {
+            while (learnDetectActive) {
+                if (!faceDetectRunning) {
+                    faceDetectRunning = true;
+                    detectPupilWithPresence(learnVideo, 'calibration');
+                    faceDetectRunning = false;
+                }
+                await new Promise(r => setTimeout(r, 80));
+            }
+        }
+        faceDetectLoop();
+
         function renderLoop() {
-            const now = performance.now();
-            if (now - lastBlinkCheck >= BLINK_CHECK_INTERVAL) {
-                detectPupilWithPresence(learnVideo, 'calibration');
-                lastBlinkCheck = now;
+            // Check blinks every frame using cached landmarks (fast, no ML inference)
+            if (lastLandmarks) {
+                updateBlinkDetection(lastLandmarks);
             }
             renderFrame(learnVideo, learnCtx, learnCanvas);
             learnRafId = requestAnimationFrame(renderLoop);
@@ -1226,6 +1241,7 @@
                 clearInterval(sampleInterval);
                 cancelAnimationFrame(learnRafId);
                 learnRafId = null;
+                learnDetectActive = false;
 
                 if (blinkCount < 1) {
                     learnCounter.textContent = `Not enough blinks detected (${blinkCount}/1). Please blink naturally and retry.`;
