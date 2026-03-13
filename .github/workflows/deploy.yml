@@ -28,6 +28,9 @@ jobs:
     needs: test
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     environment:
       name: preview
       url: ${{ steps.deploy.outputs.url }}
@@ -65,6 +68,9 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     environment:
       name: production
       url: ${{ steps.deploy.outputs.url }}
