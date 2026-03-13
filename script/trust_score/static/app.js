@@ -37,6 +37,8 @@
     let faceMesh = null;
     let sportsData = {};
     let numImages = 0;
+    let wrongIndices = [];             // swapped image indices from start_slideshow
+    let calibrationPupilSize = null;   // stored client-side for stateless POST
     let currentImageIndex = 0;
     let calibrationSamples = [];
     let slideshowReadings = [];
@@ -105,11 +107,30 @@
             videoEl.srcObject = stream;
             return;
         }
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }
-            });
-        } catch (err) {
+
+        // Progressive camera fallback chain
+        const constraints = [
+            { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } },
+            { video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } },
+            { video: { facingMode: 'user' } },
+            { video: true },
+        ];
+
+        let lastErr = null;
+        for (const constraint of constraints) {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia(constraint);
+                lastErr = null;
+                break;
+            } catch (err) {
+                lastErr = err;
+                // NotAllowedError won't be fixed by trying lower resolution
+                if (err.name === 'NotAllowedError' || err.name === 'NotFoundError') break;
+            }
+        }
+
+        if (lastErr || !stream) {
+            const err = lastErr || new Error('Camera unavailable');
             let msg = 'Camera access failed.';
             if (err.name === 'NotAllowedError') {
                 msg = 'Camera permission denied. Please allow camera access in your browser settings and reload.';
@@ -152,8 +173,18 @@
             msgEl.textContent = msg;
             overlay.style.display = 'flex';
         } else {
-            alert(msg);
+            showToast(msg, 'error');
         }
+    }
+
+    async function retryCameraAccess() {
+        const overlay = document.getElementById('camera-error-overlay');
+        if (overlay) overlay.style.display = 'none';
+        stream = null;
+        try {
+            await startCamera(learnVideo);
+            showToast('Camera connected successfully!', 'success');
+        } catch (_) { /* showCameraError already called */ }
     }
 
     /** Lock webcam exposure & white balance to prevent auto-adjustment
@@ -405,9 +436,11 @@
 
         if (videoEl.readyState >= 2) {
             if (lastLandmarks && lastLandmarks.length >= 468) {
-                // 1. Draw blurred background
+                // 1. Draw blurred background (skip on mobile — causes frame drops)
                 ctx.save();
-                ctx.filter = `blur(${BG_BLUR_PX}px)`;
+                if (!isMobile) {
+                    ctx.filter = `blur(${BG_BLUR_PX}px)`;
+                }
                 ctx.drawImage(videoEl, 0, 0, w, h);
                 ctx.restore();
 
@@ -653,6 +686,11 @@
 
     async function initFaceMesh() {
         if (faceMesh) return;
+        const mpWarn = document.getElementById('mediapipe-warning');
+        if (mpWarn) {
+            mpWarn.textContent = 'Initializing iris tracking...';
+            mpWarn.style.display = 'block';
+        }
         try {
             console.log('Loading MediaPipe Vision module...');
             const vision = await import(
@@ -675,11 +713,14 @@
                 numFaces: 1,
             });
             console.log('FaceLandmarker ready — iris tracking active');
+            if (mpWarn) mpWarn.style.display = 'none';
         } catch (e) {
             console.warn('FaceMesh init failed, falling back to simulated data:', e);
             faceMesh = null;
-            const mpWarn = document.getElementById('mediapipe-warning');
-            if (mpWarn) mpWarn.style.display = 'block';
+            if (mpWarn) {
+                mpWarn.textContent = 'Iris tracking unavailable \u2014 using estimated pupil data';
+                mpWarn.style.display = 'block';
+            }
         }
     }
 
@@ -896,10 +937,44 @@
         return pupilRadius;
     }
 
+    // ─── Mobile detection ──────────────────────────────────────────────────
+    const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+    // ─── Toast notifications ────────────────────────────────────────────────
+    function showToast(message, type = 'error') {
+        const container = document.getElementById('toast-container');
+        if (!container) { console.warn('Toast:', message); return; }
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-' + type;
+        toast.textContent = message;
+        container.appendChild(toast);
+        // Trigger animation
+        requestAnimationFrame(() => toast.classList.add('show'));
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 4000);
+    }
+
     // ─── API helpers ────────────────────────────────────────────────────────
-    async function fetchJSON(url, opts) {
-        const resp = await fetch(url, opts);
-        return resp.json();
+    async function fetchJSON(url, opts = {}) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        try {
+            const resp = await fetch(url, { ...opts, signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (!resp.ok) {
+                const errBody = await resp.json().catch(() => ({}));
+                throw new Error(errBody.error || `HTTP ${resp.status}`);
+            }
+            return resp.json();
+        } catch (err) {
+            clearTimeout(timeoutId);
+            if (err.name === 'AbortError') {
+                throw new Error('Request timed out');
+            }
+            throw err;
+        }
     }
 
     // ─── Phase 1: Select ────────────────────────────────────────────────────
@@ -984,36 +1059,42 @@
         if (!sport || !level) return;
 
         btnBegin.disabled = true;
-        const resp = await fetchJSON('/start_slideshow', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sport, level }),
-        });
-        numImages = resp.num_images || 0;
-        if (numImages === 0) {
-            alert('No images found for this selection.');
-            btnBegin.disabled = false;
-            return;
-        }
-
-        // Fetch random persona for this test run
         try {
-            const personaResp = await fetchJSON('/api/persona');
-            currentPersona = personaResp;
-            showPersonaBanner(currentPersona);
-        } catch (_) { /* persona is optional */ }
+            const resp = await fetchJSON('/start_slideshow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sport, level }),
+            });
+            numImages = resp.num_images || 0;
+            wrongIndices = resp.wrong_indices || [];
+            if (numImages === 0) {
+                showToast('No images found for this selection.', 'error');
+                btnBegin.disabled = false;
+                return;
+            }
 
-        try {
-            await startCamera(learnVideo);
-        } catch (e) {
+            // Fetch random persona for this test run
+            try {
+                const personaResp = await fetchJSON('/api/persona');
+                currentPersona = personaResp;
+                showPersonaBanner(currentPersona);
+            } catch (_) { /* persona is optional */ }
+
+            try {
+                await startCamera(learnVideo);
+            } catch (e) {
+                btnBegin.disabled = false;
+                return;
+            }
+            await initFaceMesh();
+            // Measure camera quality (non-blocking — runs in background)
+            measureCameraQuality(learnVideo);
+            showPhase('learning');
+            startLearningPass();
+        } catch (err) {
+            showToast('Failed to start assessment: ' + err.message, 'error');
             btnBegin.disabled = false;
-            return;
         }
-        await initFaceMesh();
-        // Measure camera quality (non-blocking — runs in background)
-        measureCameraQuality(learnVideo);
-        showPhase('learning');
-        startLearningPass();
     });
 
     // ─── Retry learning pass (insufficient blinks) ────────────────────────
@@ -1117,23 +1198,23 @@
         learnCounter.textContent = 'Processing calibration...';
         const calFacePresence = calTotalFrames > 0
             ? calFaceFrames / calTotalFrames : 0;
-        const resp = await fetch('/api/calibrate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                pupil_sizes: calibrationSamples,
-                blink_count: blinkCount,
-                face_presence_ratio: calFacePresence,
-            }),
-        });
-        const calResult = await resp.json();
-        if (!resp.ok) {
-            learnCounter.textContent = calResult.error || 'Calibration failed. Please retry.';
+        try {
+            const calResult = await fetchJSON('/api/calibrate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pupil_sizes: calibrationSamples,
+                    blink_count: blinkCount,
+                    face_presence_ratio: calFacePresence,
+                }),
+            });
+            calibrationPupilSize = calResult.calibration_pupil_size;
+            startTransition();
+        } catch (err) {
+            learnCounter.textContent = err.message || 'Calibration failed. Please retry.';
             const retryBtn = document.getElementById('btn-retry-calibration');
             if (retryBtn) retryBtn.style.display = 'inline-block';
-            return;
         }
-        startTransition();
     }
 
     // ─── Phase 2b: Transition ───────────────────────────────────────────────
@@ -1292,45 +1373,59 @@
         stopCamera();
         showPhase('processing');
 
-        const slideFacePresence = slideTotalFrames > 0
-            ? slideFaceFrames / slideTotalFrames : 0;
-        const totalSlideReadings = realIrisReadings + fallbackReadings;
-        const irisTrackingRatio = totalSlideReadings > 0
-            ? realIrisReadings / totalSlideReadings : 0;
+        try {
+            const slideFacePresence = slideTotalFrames > 0
+                ? slideFaceFrames / slideTotalFrames : 0;
+            const totalSlideReadings = realIrisReadings + fallbackReadings;
+            const irisTrackingRatio = totalSlideReadings > 0
+                ? realIrisReadings / totalSlideReadings : 0;
 
-        // Determine measurement type: if majority of readings used canvas, report ratio
-        const totalDetectionReadings = canvasPupilReadings + landmarkFallbackReadings + randomFallbackReadings;
-        const measurementType = (canvasPupilReadings > landmarkFallbackReadings) ? 'ratio' : 'pixel';
+            // Determine measurement type: if majority of readings used canvas, report ratio
+            const measurementType = (canvasPupilReadings > landmarkFallbackReadings) ? 'ratio' : 'pixel';
 
-        await fetchJSON('/api/submit_pupil_data', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                readings: slideshowReadings,
-                face_presence_ratio: slideFacePresence,
-                iris_tracking_ratio: irisTrackingRatio,
-                measurement_type: measurementType,
-                detection_stats: {
-                    canvas_pupil: canvasPupilReadings,
-                    landmark_iris: landmarkFallbackReadings,
-                    fallback: randomFallbackReadings,
-                },
-                facial_readings: slideshowFacialReadings,
-                facial_baseline: facialBaseline.eyeOpen || 0,
-            }),
-        });
+            const calFacePresence = calTotalFrames > 0
+                ? calFaceFrames / calTotalFrames : 0;
 
-        const result = await fetchJSON('/api/trust_score');
+            // Single stateless POST with all client-side state
+            const result = await fetchJSON('/api/trust_score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    calibration_pupil_size: calibrationPupilSize,
+                    readings: slideshowReadings,
+                    wrong_indices: wrongIndices,
+                    num_images: numImages,
+                    blink_count: blinkCount,
+                    calibration_face_presence: calFacePresence,
+                    slideshow_face_presence: slideFacePresence,
+                    iris_tracking_ratio: irisTrackingRatio,
+                    measurement_type: measurementType,
+                    detection_stats: {
+                        canvas_pupil: canvasPupilReadings,
+                        landmark_iris: landmarkFallbackReadings,
+                        fallback: randomFallbackReadings,
+                    },
+                    facial_readings: slideshowFacialReadings,
+                    facial_baseline: facialBaseline.eyeOpen || 0,
+                    persona: currentPersona,
+                }),
+            });
 
-        if (result.error) {
-            console.error('Trust score error:', result.error);
-            alert('Error computing results: ' + result.error);
+            if (result.error) {
+                console.error('Trust score error:', result.error);
+                showToast('Error computing results: ' + result.error, 'error');
+                showPhase('select');
+                btnBegin.disabled = false;
+                return;
+            }
+
+            setTimeout(() => showResults(result), 1500);
+        } catch (err) {
+            console.error('finishSlideshow error:', err);
+            showToast('Assessment failed: ' + err.message, 'error');
             showPhase('select');
             btnBegin.disabled = false;
-            return;
         }
-
-        setTimeout(() => showResults(result), 1500);
     }
 
     // ─── Phase 5: Results ───────────────────────────────────────────────────
@@ -1746,6 +1841,12 @@
                 console.error('Failed to set demo scenario:', e);
             }
         });
+    }
+
+    // Wire up camera retry button
+    const retryCameraBtn = document.getElementById('btn-retry-camera');
+    if (retryCameraBtn) {
+        retryCameraBtn.addEventListener('click', () => retryCameraAccess());
     }
 
     loadConfig();

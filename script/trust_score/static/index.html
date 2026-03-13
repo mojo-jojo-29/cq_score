@@ -2,18 +2,22 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Pupil Dilation Trust Assessment</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
     <!-- Camera error overlay -->
     <div id="camera-error-overlay" class="camera-error-overlay" style="display:none;">
         <div class="camera-error-box">
             <h2>Camera Error</h2>
             <p id="camera-error-msg">Camera access failed.</p>
             <button class="btn btn-primary" onclick="location.reload()">Reload Page</button>
+            <button class="btn btn-restart" style="margin-top:0.5rem;" id="btn-retry-camera">Retry Camera</button>
         </div>
     </div>
 
