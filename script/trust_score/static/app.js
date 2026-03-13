@@ -310,11 +310,17 @@
         return (vertical1 + vertical2) / (2.0 * horizontal);
     }
 
+    let earLogCounter = 0;
     function updateBlinkDetection(landmarks) {
-        if (!landmarks || landmarks.length < 478) return;
+        if (!landmarks || landmarks.length < 468) return;
         const leftEAR  = computeEAR(landmarks, LEFT_EYE_IDX);
         const rightEAR = computeEAR(landmarks, RIGHT_EYE_IDX);
         const avgEAR   = (leftEAR + rightEAR) / 2.0;
+
+        // Log EAR periodically to help debug blink detection on mobile
+        if (earLogCounter++ % 30 === 0) {
+            console.log(`EAR: ${avgEAR.toFixed(3)} threshold: ${EAR_THRESHOLD} closed: ${eyesClosed} blinks: ${blinkCount} landmarks: ${landmarks.length}`);
+        }
 
         if (avgEAR < EAR_THRESHOLD) {
             eyesClosed = true;
@@ -322,6 +328,7 @@
             // closed → open transition = one blink
             eyesClosed = false;
             blinkCount++;
+            console.log(`Blink #${blinkCount} detected (EAR: ${avgEAR.toFixed(3)})`);
             const el = document.getElementById('blink-count');
             if (el) el.textContent = blinkCount;
         }
@@ -709,16 +716,32 @@
             );
 
             console.log('Creating FaceLandmarker...');
-            faceMesh = await vision.FaceLandmarker.createFromOptions(filesetResolver, {
-                baseOptions: {
-                    modelAssetPath:
-                        'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-                    delegate: 'GPU',
-                },
-                runningMode: 'VIDEO',
-                numFaces: 1,
-            });
-            console.log('FaceLandmarker ready — iris tracking active');
+            // Try GPU first, fall back to CPU (some mobile devices lack WebGL2 support)
+            let delegate = 'GPU';
+            try {
+                faceMesh = await vision.FaceLandmarker.createFromOptions(filesetResolver, {
+                    baseOptions: {
+                        modelAssetPath:
+                            'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+                        delegate: 'GPU',
+                    },
+                    runningMode: 'VIDEO',
+                    numFaces: 1,
+                });
+            } catch (gpuErr) {
+                console.warn('GPU delegate failed, falling back to CPU:', gpuErr);
+                delegate = 'CPU';
+                faceMesh = await vision.FaceLandmarker.createFromOptions(filesetResolver, {
+                    baseOptions: {
+                        modelAssetPath:
+                            'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+                        delegate: 'CPU',
+                    },
+                    runningMode: 'VIDEO',
+                    numFaces: 1,
+                });
+            }
+            console.log(`FaceLandmarker ready (${delegate}) — iris tracking active`);
             if (mpWarn) mpWarn.style.display = 'none';
         } catch (e) {
             console.warn('FaceMesh init failed, falling back to simulated data:', e);
