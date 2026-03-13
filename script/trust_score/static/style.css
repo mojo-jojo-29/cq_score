@@ -716,10 +716,17 @@ select:focus, input:focus {
     .slideshow-image-wrap img {
         max-height: 280px;
     }
+    .slideshow-image-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
     .webcam-mini {
-        width: 110px;
-        bottom: 8px;
-        right: 8px;
+        position: static;
+        width: 140px;
+        margin-top: 8px;
+        border-radius: 8px;
+        border: 2px solid #e94560;
     }
     .chart-container {
         height: 220px;
@@ -759,7 +766,7 @@ select:focus, input:focus {
         font-size: 1rem;
     }
     .webcam-mini {
-        width: 90px;
+        width: 120px;
     }
     .slideshow-image-wrap img {
         max-height: 220px;
