@@ -80,7 +80,10 @@
     const PUPIL_HISTORY_SIZE = 20;
 
     // ─── Liveness / anti-spoofing state ─────────────────────────────────
-    const EAR_THRESHOLD = 0.28;
+    const EAR_THRESHOLD_DESKTOP = 0.28;
+    const EAR_THRESHOLD_MOBILE  = 0.22;
+    const EAR_THRESHOLD = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+        ? EAR_THRESHOLD_MOBILE : EAR_THRESHOLD_DESKTOP;
     const LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144];
     const RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380];
 
@@ -163,7 +166,10 @@
         }, { once: true });
 
         // Lock exposure/gain after a short warmup so auto-exposure settles first
-        setTimeout(() => lockExposure(), 2000);
+        // Skip on mobile — causes video to darken on many phone cameras
+        if (!(/Android|iPhone|iPad|iPod/i.test(navigator.userAgent))) {
+            setTimeout(() => lockExposure(), 2000);
+        }
     }
 
     function showCameraError(msg) {
