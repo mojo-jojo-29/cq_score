@@ -86,7 +86,7 @@ IRIS_TRACKING_THRESHOLD = 0.70
 MIN_IMAGE_COVERAGE = 0.5
 
 # ─── Liveness / anti-spoofing constants ──────────────────────────────────
-MIN_BLINKS_CALIBRATION = 2
+MIN_BLINKS_CALIBRATION = 1
 FACE_PRESENCE_THRESHOLD = 0.80  # 80% of frames must have a face
 
 # Demo mode: inject simulated dilation at swapped images so the patent demo

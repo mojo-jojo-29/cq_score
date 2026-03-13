@@ -78,7 +78,7 @@
     const PUPIL_HISTORY_SIZE = 20;
 
     // ─── Liveness / anti-spoofing state ─────────────────────────────────
-    const EAR_THRESHOLD = 0.25;
+    const EAR_THRESHOLD = 0.28;
     const LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144];
     const RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380];
 
@@ -1055,7 +1055,7 @@
         // Also runs throttled blink detection (~every 150ms) so quick blinks
         // aren't missed between the slower 500ms pupil-sampling interval.
         let lastBlinkCheck = 0;
-        const BLINK_CHECK_INTERVAL = 150;
+        const BLINK_CHECK_INTERVAL = 100;
         function renderLoop() {
             const now = performance.now();
             if (now - lastBlinkCheck >= BLINK_CHECK_INTERVAL) {
@@ -1098,8 +1098,8 @@
                 cancelAnimationFrame(learnRafId);
                 learnRafId = null;
 
-                if (blinkCount < 2) {
-                    learnCounter.textContent = `Not enough blinks detected (${blinkCount}/2). Please blink naturally and retry.`;
+                if (blinkCount < 1) {
+                    learnCounter.textContent = `Not enough blinks detected (${blinkCount}/1). Please blink naturally and retry.`;
                     const retryBtn = document.getElementById('btn-retry-calibration');
                     if (retryBtn) retryBtn.style.display = 'inline-block';
                     return;
