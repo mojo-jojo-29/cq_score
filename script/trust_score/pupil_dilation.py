@@ -60,15 +60,16 @@ DILATION_THRESHOLD_PCT = 0.05
 # Max fraction of correct images that can show dilation before we call it noise
 FALSE_POSITIVE_THRESHOLD = 0.30
 
-# ─── Relative comparison verdict ─────────────────────────────────────────
-# Effect size threshold (Cohen's d).  0.5 = "medium effect" — the swapped-
-# image pupil readings are noticeably higher than the correct-image readings.
-EFFECT_SIZE_THRESHOLD = float(os.environ.get('EFFECT_SIZE_THRESHOLD', '0.5'))
-
-# ─── Facial reaction composite weighting ─────────────────────────────
-PUPIL_WEIGHT = 0.75
-FACIAL_WEIGHT = 0.25
-COMPOSITE_THRESHOLD = 0.5  # same as EFFECT_SIZE_THRESHOLD
+# ─── Hybrid trust score constants ─────────────────────────────────────────
+# trust_score lives on a 15–100 scale; >= TRUST_PASS_THRESHOLD → PASS
+TRUST_PASS_THRESHOLD = 50
+# Normalisation caps for magnitude and contrast components
+MAGNITUDE_CAP_PCT = 20.0   # dilation % considered "fully dilated"
+CONTRAST_CAP_PCT = 15.0    # wrong-vs-normal gap considered "fully contrasted"
+# Blend weights (must sum to 1.0)
+DETECTION_WEIGHT = 0.50
+MAGNITUDE_WEIGHT = 0.30
+CONTRAST_WEIGHT = 0.20
 
 # ─── Anatomical sanity constants ─────────────────────────────────────────
 MIN_PUPIL_PX = 2.0    # minimum plausible iris radius in pixels
@@ -226,15 +227,14 @@ def _compute_confidence_weight(reaction_times):
     return sum(weights) / len(weights)
 
 
-def _compute_verdict(per_image_avg, wrong_indices, num_images):
-    """Relative comparison verdict using effect size (Cohen's d).
+def _compute_verdict(per_image_avg, wrong_indices, num_images, calibration):
+    """Hybrid trust score: detection ratio + magnitude + contrast.
 
-    Instead of comparing each image against an absolute threshold, we ask:
-    "are the pupil sizes at swapped images statistically higher than at
-    correct images?"  This is noise-robust because both groups share the
-    same noise — only the *difference between groups* matters.
+    Blends three complementary signals instead of relying solely on
+    Cohen's d, making the score resilient to noisy webcam data.
 
-    Returns (verdict, swapped_mean, correct_mean, effect_size).
+    Returns (verdict, swapped_mean, correct_mean, trust_score,
+             detection_ratio, magnitude_c, contrast_c).
     """
     correct_indices = [i for i in range(num_images) if i not in wrong_indices]
 
@@ -244,22 +244,59 @@ def _compute_verdict(per_image_avg, wrong_indices, num_images):
     swapped_mean = float(np.mean(swapped_vals)) if swapped_vals else 0.0
     correct_mean = float(np.mean(correct_vals)) if correct_vals else 0.0
 
-    # Pool all per-image averages to compute spread
-    all_vals = [per_image_avg[i] for i in range(num_images) if i in per_image_avg]
-    pooled_std = float(np.std(all_vals)) if len(all_vals) > 1 else 0.0
-
-    if pooled_std > 0:
-        effect_size = (swapped_mean - correct_mean) / pooled_std
+    # Dilation percentages relative to calibration baseline
+    if calibration > 0:
+        wrong_dil = [((v - calibration) / calibration) * 100 for v in swapped_vals]
+        normal_dil = [((v - calibration) / calibration) * 100 for v in correct_vals]
     else:
-        # No spread at all — can't distinguish groups
-        effect_size = 0.0
+        wrong_dil = [0.0] * len(swapped_vals)
+        normal_dil = [0.0] * len(correct_vals)
 
-    if effect_size >= EFFECT_SIZE_THRESHOLD:
+    mean_wrong_dil = float(np.mean(wrong_dil)) if wrong_dil else 0.0
+    mean_normal_dil = float(np.mean(normal_dil)) if normal_dil else 0.0
+
+    # Detection ratio: fraction of swapped images that show dilation above threshold
+    threshold_px = calibration * DILATION_THRESHOLD_PCT
+    total_swapped = len(wrong_indices)
+    detected = 0
+    for idx in wrong_indices:
+        avg_at_wrong = per_image_avg.get(idx)
+        if avg_at_wrong is not None and (avg_at_wrong - calibration) > threshold_px:
+            detected += 1
+    detection_ratio = detected / total_swapped if total_swapped > 0 else 0.0
+
+    # Magnitude: how much did swapped images dilate (capped at MAGNITUDE_CAP_PCT%)
+    magnitude_c = min(mean_wrong_dil / MAGNITUDE_CAP_PCT, 1.0) if mean_wrong_dil > 0 else 0.0
+
+    # Contrast: difference between swapped and normal dilation (capped at CONTRAST_CAP_PCT%)
+    contrast_diff = mean_wrong_dil - mean_normal_dil
+    contrast_c = min(max(contrast_diff / CONTRAST_CAP_PCT, 0), 1.0)
+
+    # False-positive penalty: if correct images also dilate above threshold,
+    # it's likely noise (e.g. lighting change), not a targeted response.
+    total_correct = len(correct_indices)
+    false_positives = 0
+    for idx in correct_indices:
+        avg_at_correct = per_image_avg.get(idx)
+        if avg_at_correct is not None and (avg_at_correct - calibration) > threshold_px:
+            false_positives += 1
+    fp_ratio = false_positives / total_correct if total_correct > 0 else 0.0
+    fp_penalty = 1.0 - fp_ratio  # 1.0 = no false positives, 0.0 = all are false positives
+
+    # Blend into trust score (15–100 scale)
+    raw = (detection_ratio * DETECTION_WEIGHT
+           + magnitude_c * MAGNITUDE_WEIGHT
+           + contrast_c * CONTRAST_WEIGHT) * fp_penalty
+    trust_score = round(raw * 85 + 15, 2)
+
+    if trust_score >= TRUST_PASS_THRESHOLD:
         verdict = "PASS"
     else:
         verdict = "FAIL"
 
-    return verdict, round(swapped_mean, 4), round(correct_mean, 4), round(effect_size, 4)
+    return (verdict, round(swapped_mean, 4), round(correct_mean, 4),
+            round(trust_score, 2), round(detection_ratio, 4),
+            round(magnitude_c, 4), round(contrast_c, 4))
 
 
 def _compute_facial_verdict(per_image_facial, wrong_indices, num_images):
@@ -347,10 +384,10 @@ def api_config():
         return jsonify({
             'demo_mode': _is_demo_mode(),
             'demo_scenario': _demo_scenario,
-            'effect_size_threshold': EFFECT_SIZE_THRESHOLD,
-            'pupil_weight': PUPIL_WEIGHT,
-            'facial_weight': FACIAL_WEIGHT,
-            'composite_threshold': COMPOSITE_THRESHOLD,
+            'trust_pass_threshold': TRUST_PASS_THRESHOLD,
+            'detection_weight': DETECTION_WEIGHT,
+            'magnitude_weight': MAGNITUDE_WEIGHT,
+            'contrast_weight': CONTRAST_WEIGHT,
         })
     except Exception:
         logger.error('Unexpected error in api_config', exc_info=True)
@@ -542,7 +579,10 @@ def _compute_trust_response(store):
             'false_positive_ratio': 0.0,
             'swapped_mean': 0.0,
             'correct_mean': 0.0,
-            'effect_size': 0.0,
+            'trust_score': 15.0,
+            'detection_ratio': 0.0,
+            'magnitude_c': 0.0,
+            'contrast_c': 0.0,
             'reaction_times': {},
             'confidence_weight': 1.0,
             'avg_reaction_time_ms': None,
@@ -552,7 +592,6 @@ def _compute_trust_response(store):
             'facial_effect_size': 0.0,
             'facial_swapped_mean': 0.0,
             'facial_correct_mean': 0.0,
-            'composite_score': 0.0,
             'per_image_facial_scores': [],
             'has_facial_data': False,
         }
@@ -605,7 +644,10 @@ def _compute_trust_response(store):
             'false_positive_ratio': 0.0,
             'swapped_mean': 0.0,
             'correct_mean': 0.0,
-            'effect_size': 0.0,
+            'trust_score': 15.0,
+            'detection_ratio': 0.0,
+            'magnitude_c': 0.0,
+            'contrast_c': 0.0,
             'reaction_times': {},
             'confidence_weight': 1.0,
             'avg_reaction_time_ms': None,
@@ -615,7 +657,6 @@ def _compute_trust_response(store):
             'facial_effect_size': 0.0,
             'facial_swapped_mean': 0.0,
             'facial_correct_mean': 0.0,
-            'composite_score': 0.0,
             'per_image_facial_scores': [],
             'has_facial_data': False,
         }
@@ -699,9 +740,10 @@ def _compute_trust_response(store):
         else:
             dilation_pct[idx] = 0.0
 
-    # ── Relative comparison verdict ──
-    verdict, swapped_mean, correct_mean, effect_size = _compute_verdict(
-        per_image_avg, wrong_indices, num_images)
+    # ── Hybrid trust score verdict ──
+    (verdict, swapped_mean, correct_mean, trust_score,
+     detection_ratio, magnitude_c, contrast_c) = _compute_verdict(
+        per_image_avg, wrong_indices, num_images, calibration)
 
     # ── Reaction-time confidence ──
     reaction_times = _compute_reaction_times(
@@ -743,30 +785,22 @@ def _compute_trust_response(store):
         for idx, scores in facial_per_image_raw.items():
             per_image_facial[idx] = float(np.mean(scores))
 
-    # Compute facial verdict and composite
+    # Compute facial verdict (still useful for display)
     facial_effect_size = 0.0
     facial_swapped_mean = 0.0
     facial_correct_mean = 0.0
-    composite_score = 0.0
     ordered_facial = []
 
     if has_facial_data and per_image_facial:
         facial_effect_size, facial_swapped_mean, facial_correct_mean = \
             _compute_facial_verdict(per_image_facial, wrong_indices, num_images)
-        composite_score = round(
-            PUPIL_WEIGHT * effect_size + FACIAL_WEIGHT * facial_effect_size, 4)
-        if composite_score >= COMPOSITE_THRESHOLD:
-            verdict = "PASS"
-        else:
-            verdict = "FAIL"
         for i in range(num_images):
             ordered_facial.append(round(per_image_facial.get(i, 0.0), 4))
     else:
-        composite_score = round(effect_size, 4)
         for i in range(num_images):
             ordered_facial.append(0.0)
 
-    # Legacy per-image detection counts
+    # Per-image detection counts
     threshold_px = calibration * DILATION_THRESHOLD_PCT
     detected_count = 0
     for idx in wrong_indices:
@@ -817,8 +851,8 @@ def _compute_trust_response(store):
         ordered_sizes.append(per_image_avg.get(i, calibration))
         ordered_dilation.append(dilation_pct.get(i, 0.0))
 
-    logger.info('Trust score verdict: %s (effect_size=%.4f, composite=%.4f)',
-                verdict, effect_size, composite_score)
+    logger.info('Trust score verdict: %s (trust_score=%.2f, detection=%.4f, magnitude=%.4f, contrast=%.4f)',
+                verdict, trust_score, detection_ratio, magnitude_c, contrast_c)
 
     response = {
         'verdict': verdict,
@@ -838,7 +872,10 @@ def _compute_trust_response(store):
         'false_positive_ratio': round(false_positive_ratio, 4),
         'swapped_mean': swapped_mean,
         'correct_mean': correct_mean,
-        'effect_size': effect_size,
+        'trust_score': trust_score,
+        'detection_ratio': detection_ratio,
+        'magnitude_c': magnitude_c,
+        'contrast_c': contrast_c,
         'reaction_times': reaction_times,
         'confidence_weight': round(confidence_weight, 4),
         'avg_reaction_time_ms': avg_reaction_time_ms,
@@ -848,7 +885,6 @@ def _compute_trust_response(store):
         'facial_effect_size': facial_effect_size,
         'facial_swapped_mean': facial_swapped_mean,
         'facial_correct_mean': facial_correct_mean,
-        'composite_score': composite_score,
         'per_image_facial_scores': ordered_facial,
         'has_facial_data': has_facial_data,
     }

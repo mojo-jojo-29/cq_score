@@ -6,6 +6,22 @@
     <title>Pupil Dilation Trust Assessment</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        // Apply saved theme before paint to prevent flash
+        (function() {
+            var t = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', t);
+            if (t === 'light') {
+                Chart.defaults.color = '#1a1a2e';
+                Chart.defaults.borderColor = '#e0e0e0';
+                Chart.defaults.backgroundColor = 'rgba(15, 52, 96, 0.7)';
+            } else {
+                Chart.defaults.color = '#8b949e';
+                Chart.defaults.borderColor = '#21262d';
+                Chart.defaults.backgroundColor = 'rgba(56, 139, 253, 0.5)';
+            }
+        })();
+    </script>
 </head>
 <body>
     <!-- Toast notifications -->
@@ -36,6 +52,9 @@
                 <option value="fail">Novice (Misses Changes)</option>
             </select>
         </div>
+        <button id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark mode">
+            <span id="theme-icon" class="theme-icon"></span>
+        </button>
     </div>
 
     <!-- Demo mode banner -->
@@ -196,14 +215,14 @@
                     </div>
                     <div class="stat-item">
                         <div id="stat-effect-size" class="stat-value">--</div>
-                        <div class="stat-label">Effect Size (Cohen's d)</div>
+                        <div class="stat-label">Trust Score (15–100)</div>
                         <div class="effect-gauge-wrap">
                             <div class="effect-gauge-track">
                                 <div id="effect-gauge-fill" class="effect-gauge-fill"></div>
-                                <div id="effect-gauge-threshold" class="effect-gauge-threshold" title="Threshold (0.5)"></div>
+                                <div id="effect-gauge-threshold" class="effect-gauge-threshold" title="Pass threshold (50)"></div>
                             </div>
                             <div class="effect-gauge-labels">
-                                <span>0</span><span>0.5</span><span>1.0</span><span>1.5</span><span>2.0</span>
+                                <span>15</span><span>35</span><span>50</span><span>75</span><span>100</span>
                             </div>
                         </div>
                     </div>
@@ -229,7 +248,7 @@
                     </div>
                     <div class="stat-item">
                         <div id="stat-composite" class="stat-value">--</div>
-                        <div class="stat-label">Composite Score (75/25)</div>
+                        <div class="stat-label">Trust Score Breakdown</div>
                     </div>
                 </div>
             </div>
@@ -282,7 +301,7 @@
                         <li><strong>Learning Phase:</strong> Sport-specific images are shown in correct sequence. Your brain memorises the order while we capture a baseline pupil measurement.</li>
                         <li><strong>Swap Introduction:</strong> Two images in the sequence are randomly swapped to create a controlled anomaly.</li>
                         <li><strong>Test Phase:</strong> The modified sequence is displayed again while your pupil size is tracked at high frequency via webcam iris detection.</li>
-                        <li><strong>Relative Comparison (Cohen's d):</strong> We compare the <em>mean pupil size at swapped images</em> against the <em>mean at correct images</em>. A medium-or-greater effect size (d &ge; 0.5) indicates the brain detected the anomaly — proving domain expertise.</li>
+                        <li><strong>Hybrid Trust Score:</strong> We blend three signals — <em>detection ratio</em> (did swapped images trigger dilation?), <em>magnitude</em> (how much?), and <em>contrast</em> (swapped vs normal difference) — into a 15–100 trust score. A score &ge; 50 indicates the brain detected the anomaly — proving domain expertise.</li>
                         <li><strong>Liveness Validation:</strong> Blink detection and face presence checks ensure a real human is present, not a photo or video replay.</li>
                         <li><strong>Reaction Time Analysis:</strong> The speed of the pupil response at swapped images provides an additional confidence signal — faster reactions indicate stronger recognition.</li>
                     </ol>

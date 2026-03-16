@@ -56,6 +56,33 @@
     let lastDetectionMethod = 'unknown'; // detection method used for the latest reading
     let cameraQuality = 'unknown';       // measured camera quality: 'high', 'medium', 'low'
 
+    // ─── Theme toggle ──────────────────────────────────────────────────────
+    function getTheme() {
+        return document.documentElement.getAttribute('data-theme') || 'dark';
+    }
+    function setTheme(t) {
+        document.documentElement.setAttribute('data-theme', t);
+        localStorage.setItem('theme', t);
+        // Update Chart.js defaults for new charts
+        if (t === 'light') {
+            Chart.defaults.color = '#1a1a2e';
+            Chart.defaults.borderColor = '#e0e0e0';
+        } else {
+            Chart.defaults.color = '#8b949e';
+            Chart.defaults.borderColor = '#21262d';
+        }
+    }
+    const themeBtn = document.getElementById('theme-toggle');
+    if (themeBtn) {
+        themeBtn.addEventListener('click', () => {
+            setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+        });
+    }
+    // Chart color helpers — read from CSS vars so charts match the active theme
+    function chartColor(varName) {
+        return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    }
+
     // ─── Persona state ─────────────────────────────────────────────────────
     let currentPersona = null;
 
@@ -74,10 +101,10 @@
 
     // ─── EMA smoothing & outlier rejection for real detection ────────────
     const EMA_ALPHA = 0.3;
-    const OUTLIER_STD_MULT = 2.0;
+    const OUTLIER_STD_MULT = 3.0;
     let emaPupil = null;               // exponential moving average
     let pupilHistory = [];             // recent readings for std calculation
-    const PUPIL_HISTORY_SIZE = 20;
+    const PUPIL_HISTORY_SIZE = 10;
 
     // ─── Liveness / anti-spoofing state ─────────────────────────────────
     const EAR_FALLBACK_THRESHOLD = 0.25; // absolute fallback before calibration
@@ -1322,6 +1349,10 @@
     function showImage(idx) {
         slideImg.src = `/get_image/${idx}?t=${Date.now()}`;
         imageStartTimes[idx] = performance.now();
+        // Reset smoothing state — each image is a new context,
+        // old history would reject valid readings as outliers
+        emaPupil = null;
+        pupilHistory = [];
         imageCounter.textContent = `Image ${idx + 1} / ${numImages}`;
         const pct = ((idx + 1) / numImages) * 100;
         slideProgress.style.width = pct + '%';
@@ -1384,43 +1415,42 @@
             // Draw video frame to canvas first so we can read pixels for pupil detection
             renderFrame(slideVideo, slideCtx, slideCanvas);
             const rawPs = detectPupilWithPresence(slideVideo, 'slideshow', slideCanvas);
-            if (rawPs !== null) {
-                const ps = smoothPupil(rawPs);
-                if (ps === null) return;  // outlier rejected
+            if (rawPs === null) { return; }
+            const ps = smoothPupil(rawPs);
+            if (ps === null) return;
 
-                // Display: show ratio if canvas detection, px otherwise
-                if (canvasPupilActive) {
-                    livePupil.textContent = ps.toFixed(3);
-                } else {
-                    livePupil.textContent = ps.toFixed(1);
-                }
+            // Display: show ratio if canvas detection, px otherwise
+            if (canvasPupilActive) {
+                livePupil.textContent = ps.toFixed(3);
+            } else {
+                livePupil.textContent = ps.toFixed(1);
+            }
 
-                const now = performance.now();
-                const onset = imageStartTimes[currentImageIndex];
-                // Skip readings during the settling window after each image
-                // change — the pupil needs time to adapt to new brightness
-                if (onset != null && (now - onset) < SETTLE_MS) return;
-                slideshowReadings.push({
+            const now = performance.now();
+            const onset = imageStartTimes[currentImageIndex];
+            // Skip readings during the settling window after each image
+            // change — the pupil needs time to adapt to new brightness
+            if (onset != null && (now - onset) < SETTLE_MS) return;
+            slideshowReadings.push({
+                index: currentImageIndex,
+                pupil_size: ps,
+                timestamp_ms: now,
+                image_onset_ms: onset || null,
+                measurement_type: canvasPupilActive ? 'ratio' : 'pixel',
+                detection_method: lastDetectionMethod,
+            });
+
+            // Facial reaction tracking
+            if (lastLandmarks && facialBaseline.eyeOpen > 0) {
+                const facialScore = computeFacialReaction(lastLandmarks, facialBaseline);
+                slideshowFacialReadings.push({
                     index: currentImageIndex,
-                    pupil_size: ps,
+                    facial_score: facialScore,
                     timestamp_ms: now,
                     image_onset_ms: onset || null,
-                    measurement_type: canvasPupilActive ? 'ratio' : 'pixel',
-                    detection_method: lastDetectionMethod,
                 });
-
-                // Facial reaction tracking
-                if (lastLandmarks && facialBaseline.eyeOpen > 0) {
-                    const facialScore = computeFacialReaction(lastLandmarks, facialBaseline);
-                    slideshowFacialReadings.push({
-                        index: currentImageIndex,
-                        facial_score: facialScore,
-                        timestamp_ms: now,
-                        image_onset_ms: onset || null,
-                    });
-                    const liveFacialEl = document.getElementById('live-facial');
-                    if (liveFacialEl) liveFacialEl.textContent = facialScore.toFixed(3);
-                }
+                const liveFacialEl = document.getElementById('live-facial');
+                if (liveFacialEl) liveFacialEl.textContent = facialScore.toFixed(3);
             }
         }, TRACKING_INTERVAL);
     }
@@ -1451,6 +1481,13 @@
                 ? calFaceFrames / calTotalFrames : 0;
 
             // Single stateless POST with all client-side state
+            console.log('=== TRUST SCORE REQUEST ===');
+            console.log('readings count:', slideshowReadings.length,
+                        'calibration:', calibrationPupilSize,
+                        'wrong_indices:', wrongIndices,
+                        'num_images:', numImages,
+                        'iris_tracking_ratio:', irisTrackingRatio,
+                        'detection_stats:', { canvas_pupil: canvasPupilReadings, landmark_iris: landmarkFallbackReadings, fallback: randomFallbackReadings });
             const result = await fetchJSON('/api/trust_score', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1474,6 +1511,9 @@
                     persona: currentPersona,
                 }),
             });
+
+            console.log('=== TRUST SCORE RESPONSE ===');
+            console.log(JSON.stringify(result, null, 2));
 
             if (result.error) {
                 console.error('Trust score error:', result.error);
@@ -1582,7 +1622,7 @@
         document.getElementById('stat-detected').textContent =
             `${data.detected_count} / ${data.total_wrong}`;
         document.getElementById('stat-effect-size').textContent =
-            data.effect_size != null ? data.effect_size.toFixed(4) : '0.0000';
+            data.trust_score != null ? data.trust_score.toFixed(2) : '15.00';
         document.getElementById('stat-swapped-mean').textContent =
             data.swapped_mean != null ? data.swapped_mean.toFixed(2) : '--';
         document.getElementById('stat-correct-mean').textContent =
@@ -1599,15 +1639,15 @@
             data.facial_effect_size != null ? data.facial_effect_size.toFixed(4) : '0.0000';
         const compositeEl = document.getElementById('stat-composite');
         if (compositeEl) compositeEl.textContent =
-            data.composite_score != null
-                ? `${data.composite_score.toFixed(4)} (75% pupil + 25% facial)`
+            data.trust_score != null
+                ? `${data.trust_score.toFixed(2)} (50% detection + 30% magnitude + 20% contrast)`
                 : '--';
 
-        // ── Effect size gauge ──
+        // ── Trust score gauge ──
         const gaugeFill = document.getElementById('effect-gauge-fill');
         if (gaugeFill) {
-            const es = Math.max(0, Math.min(data.effect_size || 0, 2.0));
-            const pct = (es / 2.0) * 100;
+            const ts = Math.max(15, Math.min(data.trust_score || 15, 100));
+            const pct = ((ts - 15) / 85) * 100;
             const isPass = data.verdict === 'PASS';
             gaugeFill.style.width = '0%';
             gaugeFill.style.background = isPass
@@ -1627,8 +1667,8 @@
                     datasets: [{
                         label: 'Mean Pupil Size (px)',
                         data: [data.correct_mean || 0, data.swapped_mean || 0],
-                        backgroundColor: ['rgba(15, 52, 96, 0.7)', 'rgba(233, 69, 96, 0.8)'],
-                        borderColor: ['#0f3460', '#c62828'],
+                        backgroundColor: [chartColor('--chart-correct'), chartColor('--chart-swapped')],
+                        borderColor: [chartColor('--chart-correct-border'), chartColor('--chart-swapped-border')],
                         borderWidth: 1,
                     }],
                 },
@@ -1639,7 +1679,7 @@
                         tooltip: {
                             callbacks: {
                                 afterLabel() {
-                                    return `Effect Size (d): ${(data.effect_size || 0).toFixed(4)}`;
+                                    return `Trust Score: ${(data.trust_score || 15).toFixed(2)}`;
                                 }
                             }
                         }
@@ -1655,12 +1695,12 @@
                         const ctx = chart.ctx;
                         ctx.save();
                         ctx.setLineDash([6, 4]);
-                        ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 2;
+                        ctx.strokeStyle = chartColor('--chart-baseline'); ctx.lineWidth = 2;
                         ctx.beginPath();
                         ctx.moveTo(chart.chartArea.left, y);
                         ctx.lineTo(chart.chartArea.right, y);
                         ctx.stroke();
-                        ctx.fillStyle = '#4caf50'; ctx.font = '11px sans-serif';
+                        ctx.fillStyle = chartColor('--chart-baseline'); ctx.font = '11px sans-serif';
                         ctx.fillText('Baseline', chart.chartArea.right - 50, y - 6);
                         ctx.restore();
                     }
@@ -1670,10 +1710,10 @@
 
         // ── Bar chart ──
         const barColors = data.image_labels.map((_, i) =>
-            data.wrong_indices.includes(i) ? 'rgba(233, 69, 96, 0.8)' : 'rgba(15, 52, 96, 0.7)'
+            data.wrong_indices.includes(i) ? chartColor('--chart-swapped') : chartColor('--chart-correct')
         );
         const barBorders = data.image_labels.map((_, i) =>
-            data.wrong_indices.includes(i) ? '#c62828' : '#0f3460'
+            data.wrong_indices.includes(i) ? chartColor('--chart-swapped-border') : chartColor('--chart-correct-border')
         );
 
         new Chart(document.getElementById('chart-bar'), {
@@ -1729,7 +1769,7 @@
 
         // ── Line chart ──
         const lineColors = data.dilation_percentages.map((_, i) =>
-            data.wrong_indices.includes(i) ? 'rgba(233, 69, 96, 1)' : 'rgba(15, 52, 96, 1)'
+            data.wrong_indices.includes(i) ? chartColor('--chart-swapped-border') : chartColor('--chart-correct-border')
         );
 
         new Chart(document.getElementById('chart-line'), {
@@ -1739,8 +1779,8 @@
                 datasets: [{
                     label: 'Dilation %',
                     data: data.dilation_percentages,
-                    borderColor: '#0f3460',
-                    backgroundColor: 'rgba(15, 52, 96, 0.1)',
+                    borderColor: chartColor('--chart-line'),
+                    backgroundColor: chartColor('--chart-line-fill'),
                     fill: true, tension: 0.3,
                     pointBackgroundColor: lineColors,
                     pointRadius: data.dilation_percentages.map((_, i) =>
@@ -1772,7 +1812,7 @@
                 } else if (rt != null && rt <= 3000) {
                     rtColors.push('rgba(255, 152, 0, 0.8)');
                 } else {
-                    rtColors.push('rgba(233, 69, 96, 0.8)');
+                    rtColors.push(chartColor('--chart-swapped'));
                 }
             }
         }
@@ -1803,10 +1843,10 @@
         const facialCanvas = document.getElementById('chart-facial');
         if (facialCanvas && data.has_facial_data && data.per_image_facial_scores) {
             const facialColors = data.image_labels.map((_, i) =>
-                data.wrong_indices.includes(i) ? 'rgba(233, 69, 96, 0.8)' : 'rgba(255, 152, 0, 0.7)'
+                data.wrong_indices.includes(i) ? chartColor('--chart-swapped') : chartColor('--chart-facial')
             );
             const facialBorders = data.image_labels.map((_, i) =>
-                data.wrong_indices.includes(i) ? '#c62828' : '#e65100'
+                data.wrong_indices.includes(i) ? chartColor('--chart-swapped-border') : chartColor('--chart-facial-border')
             );
             new Chart(facialCanvas, {
                 type: 'bar',

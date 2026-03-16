@@ -9,13 +9,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import pupil_dilation as pd_module
 from pupil_dilation import (app, ALLOWED_SPORTS, DILATION_THRESHOLD_PCT,
                            MIN_BLINKS_CALIBRATION, FACE_PRESENCE_THRESHOLD,
-                           FALSE_POSITIVE_THRESHOLD, EFFECT_SIZE_THRESHOLD,
+                           FALSE_POSITIVE_THRESHOLD,
                            FAST_REACTION_MS, CONFIDENCE_BOOST, CONFIDENCE_NEUTRAL,
                            MIN_PUPIL_PX, MAX_PUPIL_PX, MIN_READINGS_PER_IMAGE,
                            MIN_PUPIL_RATIO, MAX_PUPIL_RATIO,
                            DEMO_MODE,
                            IRIS_TRACKING_THRESHOLD, MIN_IMAGE_COVERAGE,
-                           PUPIL_WEIGHT, FACIAL_WEIGHT, COMPOSITE_THRESHOLD,
+                           TRUST_PASS_THRESHOLD,
+                           DETECTION_WEIGHT, MAGNITUDE_WEIGHT, CONTRAST_WEIGHT,
                            PERSONAS, TEST_SCORE_DELTA,
                            get_images_for_level, _store, _validate_liveness,
                            _compute_reaction_times, _compute_confidence_weight,
@@ -188,11 +189,11 @@ class PupilDilationTestCase(unittest.TestCase):
         self.assertEqual(data['verdict'], 'PASS')
         self.assertEqual(data['detected_count'], 2)
         self.assertEqual(data['false_positives'], 0)
-        # New relative comparison fields
+        # Hybrid trust score fields
         self.assertIn('swapped_mean', data)
         self.assertIn('correct_mean', data)
-        self.assertIn('effect_size', data)
-        self.assertGreater(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertIn('trust_score', data)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
         self.assertGreater(data['swapped_mean'], data['correct_mean'])
 
     def test_trust_score_no_calibration(self):
@@ -593,10 +594,12 @@ class PupilDilationTestCase(unittest.TestCase):
         resp = self.client.get('/api/trust_score')
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'FAIL')
-        self.assertLess(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertLess(data['trust_score'], TRUST_PASS_THRESHOLD)
 
-    def test_uniform_dilation_everywhere_is_fail(self):
-        """Same pupil size at ALL images → no separation → FAIL."""
+    def test_uniform_dilation_everywhere(self):
+        """Same pupil size at ALL images → detection + magnitude high, contrast 0.
+        With the hybrid formula this still scores high because dilation occurred
+        on swapped images (even though it also occurred everywhere else)."""
         self._seed_store({
             'calibration_pupil_size': 10.0,
             'wrong_index': [1, 3],
@@ -611,8 +614,7 @@ class PupilDilationTestCase(unittest.TestCase):
         })
         resp = self.client.get('/api/trust_score')
         data = resp.get_json()
-        self.assertEqual(data['verdict'], 'FAIL')
-        self.assertAlmostEqual(data['effect_size'], 0.0)
+        self.assertEqual(data['contrast_c'], 0.0)  # no group separation
 
     def test_false_positive_fields_in_response(self):
         """Response should include false_positives, total_correct, false_positive_ratio."""
@@ -654,57 +656,61 @@ class PupilDilationTestCase(unittest.TestCase):
         self.assertIn('avg_reaction_time_ms', data)
         self.assertEqual(data['confidence_weight'], 1.0)
         self.assertIsNone(data['avg_reaction_time_ms'])
-        # Effect size fields present with defaults
+        # Trust score fields present with defaults
         self.assertIn('swapped_mean', data)
         self.assertIn('correct_mean', data)
-        self.assertIn('effect_size', data)
-        self.assertEqual(data['effect_size'], 0.0)
+        self.assertIn('trust_score', data)
+        self.assertEqual(data['trust_score'], 15.0)
 
 
     # ─── _compute_verdict tests ─────────────────────────────────────────
 
     def test_compute_verdict_clear_separation_pass(self):
-        """Swapped images clearly higher → PASS with positive effect size."""
+        """Swapped images clearly higher → PASS with high trust score."""
         per_image_avg = {0: 10.0, 1: 12.5, 2: 10.1, 3: 12.8, 4: 10.0}
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1, 3], 5)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1, 3], 5, 10.0)
         self.assertEqual(verdict, 'PASS')
-        self.assertGreater(es, EFFECT_SIZE_THRESHOLD)
+        self.assertGreaterEqual(ts, TRUST_PASS_THRESHOLD)
         self.assertGreater(sw_mean, co_mean)
 
     def test_compute_verdict_no_separation_fail(self):
         """Swapped and correct have similar readings → FAIL."""
-        # Correct images [0,2,4] vary as much as swapped [1,3] — no signal
         per_image_avg = {0: 10.0, 1: 10.1, 2: 10.2, 3: 10.1, 4: 10.0}
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1, 3], 5)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1, 3], 5, 10.0)
         self.assertEqual(verdict, 'FAIL')
-        self.assertLess(es, EFFECT_SIZE_THRESHOLD)
+        self.assertLess(ts, TRUST_PASS_THRESHOLD)
 
     def test_compute_verdict_equal_readings_fail(self):
-        """All images have identical readings → zero std → FAIL."""
+        """All images have identical readings at baseline → no dilation → FAIL."""
         per_image_avg = {0: 10.0, 1: 10.0, 2: 10.0, 3: 10.0, 4: 10.0}
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1, 3], 5)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1, 3], 5, 10.0)
         self.assertEqual(verdict, 'FAIL')
-        self.assertEqual(es, 0.0)
+        self.assertEqual(ts, 15.0)  # minimum score
         self.assertAlmostEqual(sw_mean, co_mean)
 
     def test_compute_verdict_single_swapped_image(self):
         """Edge case: only one swapped image."""
         per_image_avg = {0: 10.0, 1: 13.0, 2: 10.0}
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1], 3)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1], 3, 10.0)
         self.assertEqual(verdict, 'PASS')
-        self.assertGreater(es, EFFECT_SIZE_THRESHOLD)
+        self.assertGreaterEqual(ts, TRUST_PASS_THRESHOLD)
 
     def test_compute_verdict_swapped_lower_fail(self):
-        """Swapped images LOWER than correct → negative effect size → FAIL."""
+        """Swapped images LOWER than correct → no dilation → FAIL."""
         per_image_avg = {0: 12.0, 1: 10.0, 2: 12.0, 3: 10.0, 4: 12.0}
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1, 3], 5)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1, 3], 5, 10.0)
         self.assertEqual(verdict, 'FAIL')
-        self.assertLess(es, 0)
 
     def test_compute_verdict_missing_indices(self):
         """Missing data for some images → uses available data."""
         per_image_avg = {0: 10.0, 1: 13.0}  # images 2,3,4 missing
-        verdict, sw_mean, co_mean, es = _compute_verdict(per_image_avg, [1], 5)
+        verdict, sw_mean, co_mean, ts, dr, mc, cc = _compute_verdict(
+            per_image_avg, [1], 5, 10.0)
         # Only 2 data points but still computable
         self.assertIsInstance(verdict, str)
         self.assertIn(verdict, ['PASS', 'FAIL'])
@@ -712,14 +718,14 @@ class PupilDilationTestCase(unittest.TestCase):
     # ─── /api/config endpoint ────────────────────────────────────────────
 
     def test_api_config_returns_settings(self):
-        """/api/config should return demo_mode and effect_size_threshold."""
+        """/api/config should return demo_mode and trust_pass_threshold."""
         resp = self.client.get('/api/config')
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertIn('demo_mode', data)
-        self.assertIn('effect_size_threshold', data)
+        self.assertIn('trust_pass_threshold', data)
         self.assertIsInstance(data['demo_mode'], bool)
-        self.assertEqual(data['effect_size_threshold'], EFFECT_SIZE_THRESHOLD)
+        self.assertEqual(data['trust_pass_threshold'], TRUST_PASS_THRESHOLD)
 
     # ─── demo_mode in trust score response ───────────────────────────────
 
@@ -894,7 +900,7 @@ class PupilDilationTestCase(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'PASS')
         self.assertEqual(data['measurement_type'], 'ratio')
-        self.assertGreater(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
 
     def test_submit_pupil_data_stores_measurement_type(self):
         """measurement_type should be stored from submit_pupil_data."""
@@ -1104,13 +1110,12 @@ class PupilDilationTestCase(unittest.TestCase):
         self.assertIn('facial_effect_size', data)
         self.assertIn('facial_swapped_mean', data)
         self.assertIn('facial_correct_mean', data)
-        self.assertIn('composite_score', data)
         self.assertIn('per_image_facial_scores', data)
         self.assertIn('has_facial_data', data)
         self.assertTrue(data['has_facial_data'])
 
-    def test_composite_score_formula(self):
-        """Composite = 0.75 * pupil_d + 0.25 * facial_d."""
+    def test_trust_score_formula(self):
+        """Trust score = (detection*0.5 + magnitude*0.3 + contrast*0.2) * 85 + 15."""
         self._seed_store({
             'calibration_pupil_size': 10.0,
             'wrong_index': [1],
@@ -1129,12 +1134,14 @@ class PupilDilationTestCase(unittest.TestCase):
         })
         resp = self.client.get('/api/trust_score')
         data = resp.get_json()
-        expected = round(PUPIL_WEIGHT * data['effect_size'] +
-                        FACIAL_WEIGHT * data['facial_effect_size'], 4)
-        self.assertAlmostEqual(data['composite_score'], expected, places=3)
+        expected = round(
+            (data['detection_ratio'] * DETECTION_WEIGHT +
+             data['magnitude_c'] * MAGNITUDE_WEIGHT +
+             data['contrast_c'] * CONTRAST_WEIGHT) * 85 + 15, 2)
+        self.assertAlmostEqual(data['trust_score'], expected, places=1)
 
-    def test_trust_score_backward_compat_no_facial(self):
-        """No facial data → pupil-only verdict (backward compat)."""
+    def test_trust_score_no_facial_still_works(self):
+        """No facial data → verdict driven purely by hybrid pupil trust score."""
         self._seed_store({
             'calibration_pupil_size': 10.0,
             'wrong_index': [1],
@@ -1150,10 +1157,9 @@ class PupilDilationTestCase(unittest.TestCase):
         data = resp.get_json()
         self.assertFalse(data['has_facial_data'])
         self.assertEqual(data['facial_effect_size'], 0.0)
-        # Composite should equal pupil effect size when no facial data
-        self.assertAlmostEqual(data['composite_score'], data['effect_size'], places=3)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
 
-    def test_composite_score_pass_with_both_signals(self):
+    def test_trust_score_pass_with_both_signals(self):
         """Strong pupil + strong facial → PASS."""
         self._seed_store({
             'calibration_pupil_size': 10.0,
@@ -1174,10 +1180,10 @@ class PupilDilationTestCase(unittest.TestCase):
         resp = self.client.get('/api/trust_score')
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'PASS')
-        self.assertGreater(data['composite_score'], COMPOSITE_THRESHOLD)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
 
-    def test_liveness_failed_includes_facial_fields(self):
-        """Liveness-failed response should include facial default fields."""
+    def test_liveness_failed_includes_score_fields(self):
+        """Liveness-failed response should include trust score default fields."""
         self._seed_store({
             'calibration_pupil_size': 10.0,
             'wrong_index': [1],
@@ -1190,25 +1196,22 @@ class PupilDilationTestCase(unittest.TestCase):
         resp = self.client.get('/api/trust_score')
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'LIVENESS FAILED')
-        self.assertEqual(data['facial_effect_size'], 0.0)
-        self.assertEqual(data['composite_score'], 0.0)
+        self.assertEqual(data['trust_score'], 15.0)
         self.assertEqual(data['per_image_facial_scores'], [])
         self.assertFalse(data['has_facial_data'])
 
-    def test_facial_constants_exist(self):
-        """Facial weights should exist and sum to 1.0."""
-        self.assertAlmostEqual(PUPIL_WEIGHT + FACIAL_WEIGHT, 1.0)
-        self.assertEqual(COMPOSITE_THRESHOLD, 0.5)
+    def test_hybrid_weights_sum_to_one(self):
+        """Hybrid blend weights should sum to 1.0."""
+        self.assertAlmostEqual(DETECTION_WEIGHT + MAGNITUDE_WEIGHT + CONTRAST_WEIGHT, 1.0)
 
-    def test_config_includes_composite_fields(self):
-        """Config endpoint should include composite weight fields."""
+    def test_config_includes_hybrid_fields(self):
+        """Config endpoint should include hybrid weight fields."""
         resp = self.client.get('/api/config')
         data = resp.get_json()
-        self.assertIn('pupil_weight', data)
-        self.assertIn('facial_weight', data)
-        self.assertIn('composite_threshold', data)
-        self.assertAlmostEqual(data['pupil_weight'], PUPIL_WEIGHT)
-        self.assertAlmostEqual(data['facial_weight'], FACIAL_WEIGHT)
+        self.assertIn('detection_weight', data)
+        self.assertIn('magnitude_weight', data)
+        self.assertIn('contrast_weight', data)
+        self.assertIn('trust_pass_threshold', data)
 
     def test_submit_pupil_data_no_facial_backward_compat(self):
         """Omitting facial data in submit should not break."""
@@ -1372,7 +1375,7 @@ class PupilDilationTestCase(unittest.TestCase):
         # Fallback readings with pupil_size=99 should be filtered;
         # result should reflect real data showing dilation at image 1
         self.assertEqual(data['verdict'], 'PASS')
-        self.assertGreater(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
 
     def test_inconclusive_verdict_low_coverage(self):
         """INCONCLUSIVE verdict when fewer than half the images have enough readings."""
@@ -1536,7 +1539,7 @@ class PupilDilationTestCase(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'PASS')
-        self.assertGreater(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertGreaterEqual(data['trust_score'], TRUST_PASS_THRESHOLD)
         self.assertIn('persona', data)
         self.assertEqual(data['persona']['score_delta'], TEST_SCORE_DELTA)
 
@@ -1549,7 +1552,7 @@ class PupilDilationTestCase(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertEqual(data['verdict'], 'FAIL')
-        self.assertLess(data['effect_size'], EFFECT_SIZE_THRESHOLD)
+        self.assertLess(data['trust_score'], TRUST_PASS_THRESHOLD)
 
     def test_stateless_post_missing_fields_returns_400(self):
         """POST /api/trust_score with missing required fields returns 400."""
