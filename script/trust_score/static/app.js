@@ -1312,8 +1312,11 @@
     // ─── Phase 2b: Transition ───────────────────────────────────────────────
     function startTransition() {
         showPhase('transition');
+        // Pre-attach stream and start playing during transition so the video
+        // is live by the time the slideshow begins (prevents frozen frame)
+        slideVideo.srcObject = stream;
+        slideVideo.play().catch(() => {});
         setTimeout(() => {
-            slideVideo.srcObject = stream;
             showPhase('slideshow');
             startSlideshow();
         }, 3000);
@@ -1335,13 +1338,11 @@
         randomFallbackReadings = 0;
         canvasPupilActive = false;
 
-        // Size mini canvas to video resolution
-        slideVideo.addEventListener('loadedmetadata', () => {
-            slideCanvas.width  = slideVideo.videoWidth  || 640;
-            slideCanvas.height = slideVideo.videoHeight || 480;
-        }, { once: true });
-        slideCanvas.width  = 640;
-        slideCanvas.height = 480;
+        // Sync canvas to actual video dimensions
+        const vw = slideVideo.videoWidth  || 640;
+        const vh = slideVideo.videoHeight || 480;
+        slideCanvas.width  = vw;
+        slideCanvas.height = vh;
 
         showImage(currentImageIndex);
         startPupilTracking();
