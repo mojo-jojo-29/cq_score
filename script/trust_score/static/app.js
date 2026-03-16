@@ -1621,41 +1621,10 @@
             (data.calibration_pupil_size || 0).toFixed(1);
         document.getElementById('stat-detected').textContent =
             `${data.detected_count} / ${data.total_wrong}`;
-        document.getElementById('stat-effect-size').textContent =
-            data.trust_score != null ? data.trust_score.toFixed(2) : '15.00';
         document.getElementById('stat-swapped-mean').textContent =
             data.swapped_mean != null ? data.swapped_mean.toFixed(2) : '--';
         document.getElementById('stat-correct-mean').textContent =
             data.correct_mean != null ? data.correct_mean.toFixed(2) : '--';
-
-        document.getElementById('stat-reaction-time').textContent =
-            data.avg_reaction_time_ms != null ? data.avg_reaction_time_ms.toFixed(0) : 'N/A';
-        document.getElementById('stat-confidence').textContent =
-            data.confidence_weight != null ? data.confidence_weight.toFixed(4) : '1.0000';
-
-        // Facial reaction stats
-        const facialEffEl = document.getElementById('stat-facial-effect');
-        if (facialEffEl) facialEffEl.textContent =
-            data.facial_effect_size != null ? data.facial_effect_size.toFixed(4) : '0.0000';
-        const compositeEl = document.getElementById('stat-composite');
-        if (compositeEl) compositeEl.textContent =
-            data.trust_score != null
-                ? `${data.trust_score.toFixed(2)} (50% detection + 30% magnitude + 20% contrast)`
-                : '--';
-
-        // ── Trust score gauge ──
-        const gaugeFill = document.getElementById('effect-gauge-fill');
-        if (gaugeFill) {
-            const ts = Math.max(15, Math.min(data.trust_score || 15, 100));
-            const pct = ((ts - 15) / 85) * 100;
-            const isPass = data.verdict === 'PASS';
-            gaugeFill.style.width = '0%';
-            gaugeFill.style.background = isPass
-                ? 'linear-gradient(90deg, #4caf50, #2e7d32)'
-                : 'linear-gradient(90deg, #e94560, #c62828)';
-            // Animate after a short delay
-            setTimeout(() => { gaugeFill.style.width = pct + '%'; }, 200);
-        }
 
         // ── Group comparison chart (Correct vs Swapped means) ──
         const groupCanvas = document.getElementById('chart-group');
