@@ -44,6 +44,7 @@
     let slideshowReadings = [];
     let trackingInterval = null;
     let learnRafId = null;
+    let slideRafId = null;
     let lastLandmarks = null;         // latest iris landmarks for rendering
     let imageStartTimes = {};         // {imageIndex: performance.now()} for reaction-time tracking
     let realIrisReadings = 0;         // count of readings from actual MediaPipe iris tracking
@@ -1408,12 +1409,17 @@
         emaPupil = null;
         pupilHistory = [];
 
+        // Continuous render loop for smooth video display (separate from tracking)
+        function slideRenderLoop() {
+            renderFrame(slideVideo, slideCtx, slideCanvas);
+            slideRafId = requestAnimationFrame(slideRenderLoop);
+        }
+        slideRafId = requestAnimationFrame(slideRenderLoop);
+
         // Use faster sampling when canvas pupil detection may be active
         TRACKING_INTERVAL = TRACKING_INTERVAL_FAST;
 
         trackingInterval = setInterval(() => {
-            // Draw video frame to canvas first so we can read pixels for pupil detection
-            renderFrame(slideVideo, slideCtx, slideCanvas);
             const rawPs = detectPupilWithPresence(slideVideo, 'slideshow', slideCanvas);
             if (rawPs === null) { return; }
             const ps = smoothPupil(rawPs);
@@ -1459,6 +1465,10 @@
         if (trackingInterval) {
             clearInterval(trackingInterval);
             trackingInterval = null;
+        }
+        if (slideRafId) {
+            cancelAnimationFrame(slideRafId);
+            slideRafId = null;
         }
     }
 
